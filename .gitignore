@@ -1,0 +1,33 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Frontend
+node_modules/
+.next/
+.turbo/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local uploads and generated files
+uploads/
+storage/
+
+# Operating systems
+.DS_Store
+Thumbs.db
