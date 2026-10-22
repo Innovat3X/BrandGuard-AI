@@ -5,7 +5,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     DateTime,
     ForeignKey,
-    ForeignKeyConstraint,
     String,
     Uuid,
     func,
@@ -18,17 +17,6 @@ from app.infrastructure.db.base import Base
 
 class Notification(Base):
     __tablename__ = "notifications"
-
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["organization_id", "user_id"],
-            [
-                "organization_memberships.organization_id",
-                "organization_memberships.user_id",
-            ],
-            name="fk_notifications_org_recipient_membership",
-        ),
-    )
 
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -45,6 +33,7 @@ class Notification(Base):
 
     user_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
+        ForeignKey("users.id"),
         nullable=False,
         index=True,
     )

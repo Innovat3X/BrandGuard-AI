@@ -27,6 +27,11 @@ class SubmissionVersion(Base):
             "version_number",
         ),
         UniqueConstraint(
+            "submission_id",
+            "id",
+            name="uq_submission_versions_submission_id_id",
+        ),
+        UniqueConstraint(
             "organization_id",
             "id",
             name="uq_submission_versions_organization_id_id",
@@ -35,14 +40,6 @@ class SubmissionVersion(Base):
             ["organization_id", "submission_id"],
             ["submissions.organization_id", "submissions.id"],
             name="fk_submission_versions_org_submission_submissions",
-        ),
-        ForeignKeyConstraint(
-            ["organization_id", "created_by"],
-            [
-                "organization_memberships.organization_id",
-                "organization_memberships.user_id",
-            ],
-            name="fk_submission_versions_org_creator_membership",
         ),
         CheckConstraint(
             "version_number > 0",

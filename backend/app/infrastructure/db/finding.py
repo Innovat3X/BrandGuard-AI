@@ -42,14 +42,6 @@ class Finding(Base):
             name="fk_findings_org_job_submission_version",
         ),
         ForeignKeyConstraint(
-            ["organization_id", "submission_version_id"],
-            [
-                "submission_versions.organization_id",
-                "submission_versions.id",
-            ],
-            name="fk_findings_org_submission_version",
-        ),
-        ForeignKeyConstraint(
             ["organization_id", "source_rule_version_id"],
             [
                 "brand_rule_versions.organization_id",

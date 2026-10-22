@@ -33,6 +33,14 @@ class ReviewAction(Base):
             ],
             name="fk_review_actions_org_submission_version",
         ),
+        ForeignKeyConstraint(
+            ["submission_id", "submission_version_id"],
+            [
+                "submission_versions.submission_id",
+                "submission_versions.id",
+            ],
+            name="fk_review_actions_submission_version_pair",
+        ),
         CheckConstraint(
             "action IN ('approve', 'request_changes', 'reject')",
             name="valid_action",

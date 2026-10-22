@@ -6,7 +6,6 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
-    ForeignKeyConstraint,
     String,
     Uuid,
     func,
@@ -21,22 +20,6 @@ class BrandAsset(Base):
     __tablename__ = "brand_assets"
 
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["organization_id", "created_by"],
-            [
-                "organization_memberships.organization_id",
-                "organization_memberships.user_id",
-            ],
-            name="fk_brand_assets_org_creator_membership",
-        ),
-        ForeignKeyConstraint(
-            ["organization_id", "approved_by"],
-            [
-                "organization_memberships.organization_id",
-                "organization_memberships.user_id",
-            ],
-            name="fk_brand_assets_org_approver_membership",
-        ),
         CheckConstraint(
             "size_bytes >= 0",
             name="non_negative_size_bytes",
@@ -99,12 +82,14 @@ class BrandAsset(Base):
 
     created_by: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
+        ForeignKey("users.id"),
         nullable=False,
         index=True,
     )
 
     approved_by: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
+        ForeignKey("users.id"),
         nullable=True,
     )
 

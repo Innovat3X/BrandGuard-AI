@@ -30,11 +30,6 @@ class AnalysisJob(Base):
         UniqueConstraint(
             "organization_id",
             "id",
-            name="uq_analysis_jobs_organization_id_id",
-        ),
-        UniqueConstraint(
-            "organization_id",
-            "id",
             "submission_version_id",
             name="uq_analysis_jobs_org_id_submission_version",
         ),
