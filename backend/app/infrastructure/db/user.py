@@ -1,14 +1,29 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, String, Uuid, func, true
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    String,
+    Uuid,
+    func,
+    true,
+)
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.infrastructure.db.base import Base
 
 
 class User(Base):
     __tablename__ = "users"
+
+    __table_args__ = (
+        CheckConstraint(
+            "email = lower(trim(email))",
+            name="normalized_email",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -51,3 +66,12 @@ class User(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+    @validates("email")
+    def normalize_email(
+        self,
+        key: str,
+        value: str,
+    ) -> str:
+        """Normalize email addresses before ORM persistence."""
+        return value.strip().lower()

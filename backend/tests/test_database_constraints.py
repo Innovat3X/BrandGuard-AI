@@ -332,6 +332,7 @@ def test_analysis_job_cannot_reference_another_orgs_version(
         db_session,
         "tenant-a",
     )
+
     organization_b, _ = create_org_user(
         db_session,
         "tenant-b",
@@ -390,4 +391,32 @@ def test_review_action_must_reference_its_exact_submission_version(
     with pytest.raises(IntegrityError):
         with db_session.begin_nested():
             db_session.add(incorrect_review)
+            db_session.flush()
+
+
+def test_user_email_is_normalized_and_unique(
+    db_session: Session,
+) -> None:
+    user = User(
+        full_name="Synthetic Email Test",
+        email="  GiRiSh@Example.Test  ",
+        password_hash="synthetic-test-hash",
+        is_active=True,
+    )
+
+    db_session.add(user)
+    db_session.flush()
+
+    assert user.email == "girish@example.test"
+
+    duplicate = User(
+        full_name="Duplicate Email Test",
+        email="GIRISH@example.test",
+        password_hash="synthetic-test-hash",
+        is_active=True,
+    )
+
+    with pytest.raises(IntegrityError):
+        with db_session.begin_nested():
+            db_session.add(duplicate)
             db_session.flush()
