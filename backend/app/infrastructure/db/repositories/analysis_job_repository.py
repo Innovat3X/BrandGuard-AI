@@ -1,4 +1,3 @@
-
 from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID, uuid4
@@ -24,6 +23,8 @@ JOB_STATUSES = {
 }
 
 TERMINAL_JOB_STATUSES = {"completed", "partial", "failed"}
+
+SOURCE_VERSION_VALID_STATUSES = {"approved", "archived"}
 
 SUBMISSION_STATUSES = {
     "draft",
@@ -170,6 +171,11 @@ class AnalysisJobRepository:
         Returns None when the job does not exist or has already been
         claimed by another worker. The returned attempts value is the
         claimed-attempt token for stale-worker protection.
+
+        started_at records the first-ever processing start and is
+        preserved across retries. updated_at is refreshed on each
+        successful claim. Recovery code should use updated_at as the
+        current staleness baseline, not started_at.
         """
         statement = (
             update(AnalysisJob)
@@ -219,12 +225,22 @@ class AnalysisJobRepository:
         new_status: str,
         error_code: str | None = None,
         error_message: str | None = None,
+        claimed_attempt: int | None = None,
     ) -> AnalysisJob | None:
-        """Conditionally change a job status within its organization.
+        """Apply a non-terminal status transition safely.
 
-        Returns None if the job is absent or its current status differs
-        from expected_status. Finalisation with findings should use
-        persist_findings_and_finish_job() instead.
+        Queued -> processing must use claim_queued_job(), which increments
+        the attempt count atomically.
+
+        Processing -> queued requires the current claimed_attempt token
+        and uses it as part of the conditional UPDATE.
+
+        Completed, partial, and failed are terminal states. They must be
+        written through persist_findings_and_finish_job(), which locks
+        the job and validates the claimed attempt before finalisation.
+
+        Returns None when the scoped job or expected state/attempt does
+        not match. The application service owns commits and rollbacks.
         """
         if expected_status not in JOB_STATUSES:
             raise ValueError(
@@ -236,25 +252,60 @@ class AnalysisJobRepository:
                 f"Unsupported new job status: {new_status}"
             )
 
+        if new_status in TERMINAL_JOB_STATUSES:
+            raise ValueError(
+                "Terminal job transitions must use "
+                "persist_findings_and_finish_job() so the claimed "
+                "attempt can be validated."
+            )
+
+        if new_status == "processing":
+            raise ValueError(
+                "Queued jobs must be claimed with claim_queued_job()."
+            )
+
+        if expected_status in TERMINAL_JOB_STATUSES:
+            raise ValueError(
+                "Terminal analysis jobs cannot transition to another status."
+            )
+
+        if expected_status == "processing":
+            if claimed_attempt is None:
+                raise ValueError(
+                    "claimed_attempt is required when updating a processing job."
+                )
+
+            if new_status != "queued":
+                raise ValueError(
+                    "A processing job can only be requeued through "
+                    "an attempt-aware status update."
+                )
+        elif claimed_attempt is not None:
+            raise ValueError(
+                "claimed_attempt may only be supplied when "
+                "expected_status is 'processing'."
+            )
+
         values: dict[str, Any] = {
             "status": new_status,
             "error_code": error_code,
             "error_message": error_message,
-            "completed_at": (
-                func.now()
-                if new_status in TERMINAL_JOB_STATUSES
-                else None
-            ),
+            "completed_at": None,
             "updated_at": func.now(),
         }
 
+        conditions = [
+            AnalysisJob.organization_id == organization_id,
+            AnalysisJob.id == job_id,
+            AnalysisJob.status == expected_status,
+        ]
+
+        if expected_status == "processing":
+            conditions.append(AnalysisJob.attempts == claimed_attempt)
+
         statement = (
             update(AnalysisJob)
-            .where(
-                AnalysisJob.organization_id == organization_id,
-                AnalysisJob.id == job_id,
-                AnalysisJob.status == expected_status,
-            )
+            .where(*conditions)
             .values(**values)
             .returning(AnalysisJob.id)
         )
@@ -278,45 +329,57 @@ class AnalysisJobRepository:
         organization_id: UUID,
         findings: Sequence[Mapping[str, Any]],
     ) -> None:
-        """Reject finding references that are absent, cross-tenant, or unapproved.
+        """Validate source provenance for new findings.
 
-        Null references are permitted when a finding does not rely on
-        a particular rule or fact. Only approved versions belonging to
-        the supplied organization may be referenced.
+        Approved versions are valid sources. Archived versions are also
+        valid historical sources only when approval metadata proves that
+        they were approved before archival. Draft or otherwise unapproved
+        versions and cross-organisation references are rejected.
+
+        New analysis must select from currently applicable approved
+        versions and retain the exact version IDs it used.
         """
         for index, finding in enumerate(findings):
             rule_version_id = finding.get("source_rule_version_id")
 
             if rule_version_id is not None:
-                approved_rule_version_id = self._session.scalar(
-                    select(BrandRuleVersion.id).where(
+                rule_version = self._session.scalar(
+                    select(BrandRuleVersion).where(
                         BrandRuleVersion.organization_id == organization_id,
                         BrandRuleVersion.id == rule_version_id,
-                        BrandRuleVersion.status == "approved",
                     )
                 )
 
-                if approved_rule_version_id is None:
+                if (
+                    rule_version is None
+                    or rule_version.status not in SOURCE_VERSION_VALID_STATUSES
+                    or rule_version.approved_at is None
+                    or rule_version.approved_by is None
+                ):
                     raise ValueError(
-                        f"Finding at index {index} must reference an "
-                        "approved rule version in the same organization."
+                        f"Finding at index {index} must reference a "
+                        "previously approved rule version in the same organization."
                     )
 
             fact_version_id = finding.get("source_fact_version_id")
 
             if fact_version_id is not None:
-                approved_fact_version_id = self._session.scalar(
-                    select(BrandFactVersion.id).where(
+                fact_version = self._session.scalar(
+                    select(BrandFactVersion).where(
                         BrandFactVersion.organization_id == organization_id,
                         BrandFactVersion.id == fact_version_id,
-                        BrandFactVersion.status == "approved",
                     )
                 )
 
-                if approved_fact_version_id is None:
+                if (
+                    fact_version is None
+                    or fact_version.status not in SOURCE_VERSION_VALID_STATUSES
+                    or fact_version.approved_at is None
+                    or fact_version.approved_by is None
+                ):
                     raise ValueError(
-                        f"Finding at index {index} must reference an "
-                        "approved fact version in the same organization."
+                        f"Finding at index {index} must reference a "
+                        "previously approved fact version in the same organization."
                     )
 
     def persist_findings_and_finish_job(
@@ -334,11 +397,12 @@ class AnalysisJobRepository:
         """Persist findings and finalise the claimed job in one transaction.
 
         Returns False if the job is no longer processing or the attempt
-        token is stale. In that case, no findings are written.
+        token is stale. In that case, no findings or final status changes
+        are written.
 
         Duplicate fingerprints within the same job are ignored.
-        Referenced rule/fact versions must be approved and belong to
-        the same organization as the job.
+        Referenced rule/fact versions must have valid approval provenance
+        and belong to the same organization as the job.
 
         Submission status is updated only if the analysed version is
         still the submission's current version.

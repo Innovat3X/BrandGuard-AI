@@ -103,6 +103,77 @@ def test_list_for_organization_excludes_other_organizations(db_session):
     assert membership_b.id not in [item.id for item in result]
 
 
+def test_list_for_user_returns_empty_list_without_memberships(db_session):
+    _, user = create_org_user(db_session, "list-user-empty")
+    repository = OrganizationMembershipRepository(db_session)
+
+    assert repository.list_for_user(user.id) == []
+
+
+def test_list_for_user_returns_single_membership_and_role(db_session):
+    organization, user = create_org_user(db_session, "list-user-single")
+    repository = OrganizationMembershipRepository(db_session)
+
+    membership = repository.create_membership(
+        organization.id,
+        user.id,
+        "reviewer",
+    )
+
+    result = repository.list_for_user(user.id)
+
+    assert len(result) == 1
+    assert result[0].id == membership.id
+    assert result[0].organization_id == organization.id
+    assert result[0].user_id == user.id
+    assert result[0].role == "reviewer"
+
+
+def test_list_for_user_returns_all_memberships_for_that_user(db_session):
+    organization_a, user = create_org_user(
+        db_session,
+        "list-user-multiple",
+    )
+    organization_b, other_user = create_org_user(
+        db_session,
+        "list-user-other",
+    )
+    repository = OrganizationMembershipRepository(db_session)
+
+    membership_a = repository.create_membership(
+        organization_a.id,
+        user.id,
+        "creator",
+    )
+    membership_b = repository.create_membership(
+        organization_b.id,
+        user.id,
+        "admin",
+    )
+
+    # This membership must not be returned for the original user.
+    repository.create_membership(
+        organization_b.id,
+        other_user.id,
+        "reviewer",
+    )
+
+    result = repository.list_for_user(user.id)
+
+    assert {item.id for item in result} == {
+        membership_a.id,
+        membership_b.id,
+    }
+    assert {
+        item.organization_id: item.role
+        for item in result
+    } == {
+        organization_a.id: "creator",
+        organization_b.id: "admin",
+    }
+    assert all(item.user_id == user.id for item in result)
+
+
 def test_update_role_changes_existing_membership(db_session):
     organization, user = create_org_user(db_session, "update-role")
     repository = OrganizationMembershipRepository(db_session)

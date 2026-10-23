@@ -15,7 +15,9 @@ class OrganizationMembershipRepository:
     """Database operations for organisation memberships.
 
     Authorization and transaction boundaries belong to application
-    services. Every membership lookup is scoped to an organisation.
+    services. Organisation-specific membership lookups are scoped by
+    organisation. User-scoped listing returns only that user's own
+    memberships and does not select an active organisation.
     """
 
     def __init__(self, session: Session) -> None:
@@ -86,6 +88,28 @@ class OrganizationMembershipRepository:
                 OrganizationMembership.id,
             )
             .limit(limit)
+        )
+
+        return list(self._session.scalars(statement).all())
+
+    def list_for_user(
+        self,
+        user_id: UUID,
+    ) -> list[OrganizationMembership]:
+        """List every organisation membership belonging to one user.
+
+        Results are ordered deterministically. This method does not choose
+        an active organisation and does not replace service-level
+        authorization or the login API's organisation-selection policy.
+        """
+        statement = (
+            select(OrganizationMembership)
+            .where(OrganizationMembership.user_id == user_id)
+            .order_by(
+                OrganizationMembership.organization_id,
+                OrganizationMembership.created_at,
+                OrganizationMembership.id,
+            )
         )
 
         return list(self._session.scalars(statement).all())

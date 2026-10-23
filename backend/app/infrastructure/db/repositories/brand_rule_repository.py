@@ -1,4 +1,3 @@
-
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -60,6 +59,80 @@ class BrandRuleRepository:
             created_by=created_by,
         )
         self._session.add(version)
+        self._session.flush()
+
+        return rule, version
+
+    def update_draft_rule(
+        self,
+        organization_id: UUID,
+        rule_id: UUID,
+        title: str,
+        category: str,
+        rule_text: str,
+        severity: str,
+        description: str | None = None,
+    ) -> tuple[BrandRule, BrandRuleVersion] | None:
+        """Update a rule's latest draft version within its organization.
+
+        The parent rule row is locked first. Version creation uses the
+        same lock, preventing a concurrent version from being created
+        between checking the latest version and updating it.
+
+        Only the latest version may be edited, and only when its status
+        is draft. Approved and archived versions are never overwritten.
+
+        Returns None when the rule does not belong to the organization.
+        Authorization and transaction ownership remain with the service.
+        """
+        self._validate_version_fields(category, rule_text, severity)
+
+        if not title.strip():
+            raise ValueError("Rule title must not be empty.")
+
+        rule = self._session.scalar(
+            select(BrandRule)
+            .where(
+                BrandRule.organization_id == organization_id,
+                BrandRule.id == rule_id,
+            )
+            .with_for_update()
+        )
+
+        if rule is None:
+            return None
+
+        version = self._session.scalar(
+            select(BrandRuleVersion)
+            .where(
+                BrandRuleVersion.organization_id == organization_id,
+                BrandRuleVersion.rule_id == rule_id,
+            )
+            .order_by(BrandRuleVersion.version_number.desc())
+            .limit(1)
+            .with_for_update()
+        )
+
+        if version is None:
+            raise LookupError(
+                "No rule version exists for the specified organization and rule."
+            )
+
+        if version.status != "draft":
+            raise ValueError(
+                "Only the latest draft rule version can be updated. "
+                "Create a new draft version to change an approved rule."
+            )
+
+        # The title belongs to the parent rule. Versioned content belongs
+        # to the draft version. Approved historical version rows remain
+        # unchanged.
+        rule.title = title
+        version.category = category
+        version.description = description
+        version.rule_text = rule_text
+        version.severity = severity
+
         self._session.flush()
 
         return rule, version

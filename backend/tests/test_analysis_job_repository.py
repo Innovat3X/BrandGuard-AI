@@ -1,14 +1,17 @@
-
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
 
 from app.infrastructure.db import (
     AnalysisJob,
     Finding,
     Organization,
     Submission,
+    SubmissionVersion,
     User,
 )
 from app.infrastructure.db.repositories.analysis_job_repository import (
@@ -114,6 +117,8 @@ def create_rule_version(
             approved_by=user.id,
         )
     elif status == "archived":
+        # This path archives a version that was never approved.
+        # It deliberately has no approval metadata.
         version.status = "archived"
         db_session.flush()
 
@@ -143,6 +148,8 @@ def create_fact_version(
             approved_by=user.id,
         )
     elif status == "archived":
+        # This path archives a version that was never approved.
+        # It deliberately has no approval metadata.
         version.status = "archived"
         db_session.flush()
 
@@ -284,6 +291,91 @@ def test_only_one_claim_can_succeed(db_session):
     assert second_claim is None
 
 
+def test_two_concurrent_claims_allow_only_one_worker(postgres_test_engine):
+    """Prove that two independent PostgreSQL sessions cannot claim one job."""
+    suffix = uuid4().hex
+
+    with Session(postgres_test_engine) as setup_session:
+        with setup_session.begin():
+            organization, user = create_org_user(setup_session)
+            submission, version = create_submission_version(
+                setup_session,
+                organization,
+                user,
+            )
+
+            job = AnalysisJobRepository(
+                setup_session
+            ).create_or_get_analysis_job(
+                organization_id=organization.id,
+                submission_version_id=version.id,
+                idempotency_key=f"concurrent-claim-{suffix}",
+            )
+
+            organization_id = organization.id
+            user_id = user.id
+            submission_id = submission.id
+            version_id = version.id
+            job_id = job.id
+
+    barrier = Barrier(2)
+
+    def try_claim():
+        with Session(postgres_test_engine) as session:
+            barrier.wait(timeout=10)
+
+            with session.begin():
+                claimed = AnalysisJobRepository(session).claim_queued_job(
+                    job_id
+                )
+                return None if claimed is None else claimed.attempts
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda _: try_claim(), range(2)))
+
+        assert sorted(value for value in outcomes if value is not None) == [1]
+        assert outcomes.count(None) == 1
+
+        with Session(postgres_test_engine) as verify_session:
+            saved_job = verify_session.get(AnalysisJob, job_id)
+
+            assert saved_job is not None
+            assert saved_job.status == "processing"
+            assert saved_job.attempts == 1
+    finally:
+        # These records were committed to allow separate sessions to race.
+        # Remove only the test records, in foreign-key-safe order.
+        with Session(postgres_test_engine) as cleanup_session:
+            with cleanup_session.begin():
+                cleanup_session.execute(
+                    delete(Finding).where(
+                        Finding.analysis_job_id == job_id
+                    )
+                )
+                cleanup_session.execute(
+                    delete(AnalysisJob).where(AnalysisJob.id == job_id)
+                )
+                cleanup_session.execute(
+                    delete(SubmissionVersion).where(
+                        SubmissionVersion.id == version_id
+                    )
+                )
+                cleanup_session.execute(
+                    delete(Submission).where(
+                        Submission.id == submission_id
+                    )
+                )
+                cleanup_session.execute(
+                    delete(User).where(User.id == user_id)
+                )
+                cleanup_session.execute(
+                    delete(Organization).where(
+                        Organization.id == organization_id
+                    )
+                )
+
+
 def test_claim_unknown_job_returns_none(db_session):
     repository = AnalysisJobRepository(db_session)
 
@@ -306,24 +398,86 @@ def test_job_status_update_checks_expected_status(db_session):
         idempotency_key="request-005",
     )
 
+    # A status mismatch returns None for a valid non-terminal transition.
     rejected_update = repository.update_job_status(
         organization_id=organization.id,
         job_id=job.id,
         expected_status="processing",
-        new_status="completed",
+        new_status="queued",
+        claimed_attempt=1,
     )
 
     assert rejected_update is None
 
-    accepted_update = repository.update_job_status(
-        organization_id=organization.id,
-        job_id=job.id,
-        expected_status="queued",
-        new_status="processing",
+    # Generic status updates cannot bypass atomic claiming.
+    with pytest.raises(ValueError, match="claim_queued_job"):
+        repository.update_job_status(
+            organization_id=organization.id,
+            job_id=job.id,
+            expected_status="queued",
+            new_status="processing",
+        )
+
+    # Terminal outcomes must use the attempt-aware finalisation method.
+    with pytest.raises(
+        ValueError,
+        match="persist_findings_and_finish_job",
+    ):
+        repository.update_job_status(
+            organization_id=organization.id,
+            job_id=job.id,
+            expected_status="queued",
+            new_status="failed",
+            error_code="DISPATCH_FAILED",
+            error_message="The job could not be dispatched.",
+        )
+
+    db_session.refresh(job)
+    assert job.status == "queued"
+    assert job.attempts == 0
+
+
+def test_processing_job_requeue_requires_current_attempt(db_session):
+    organization, user = create_org_user(db_session)
+    repository, job, _, claimed = create_claimed_job(
+        db_session,
+        organization,
+        user,
+        "attempt-aware-requeue",
     )
 
-    assert accepted_update is not None
-    assert accepted_update.status == "processing"
+    assert claimed.attempts == 1
+
+    # Simulate recovery: attempt 2 now owns the processing job.
+    job.attempts = 2
+    db_session.flush()
+    db_session.refresh(job)
+
+    stale_requeue = repository.update_job_status(
+        organization_id=organization.id,
+        job_id=job.id,
+        expected_status="processing",
+        new_status="queued",
+        claimed_attempt=1,
+    )
+
+    assert stale_requeue is None
+
+    db_session.refresh(job)
+    assert job.status == "processing"
+    assert job.attempts == 2
+
+    current_requeue = repository.update_job_status(
+        organization_id=organization.id,
+        job_id=job.id,
+        expected_status="processing",
+        new_status="queued",
+        claimed_attempt=2,
+    )
+
+    assert current_requeue is not None
+    assert current_requeue.status == "queued"
+    assert current_requeue.attempts == 2
 
 
 def test_findings_are_deduplicated_and_job_is_finalized(db_session):
@@ -393,7 +547,7 @@ def test_stale_worker_cannot_persist_findings(db_session):
     assert claimed.attempts == 1
 
     # Simulate a newer attempt becoming authoritative.
-    claimed.attempts = 2
+    job.attempts = 2
     db_session.flush()
 
     finalized = repository.persist_findings_and_finish_job(
@@ -415,8 +569,61 @@ def test_stale_worker_cannot_persist_findings(db_session):
 
     assert finding_count == 0
 
-    db_session.refresh(claimed)
-    assert claimed.status == "processing"
+    db_session.refresh(job)
+    assert job.status == "processing"
+
+
+def test_stale_worker_cannot_mark_newer_attempt_failed(db_session):
+    organization, user = create_org_user(db_session)
+    repository, job, version, claimed = create_claimed_job(
+        db_session,
+        organization,
+        user,
+        "stale-worker-failure",
+    )
+
+    assert claimed.attempts == 1
+
+    # Simulate recovery/reclaim: attempt 2 now owns this job.
+    job.attempts = 2
+    db_session.flush()
+    db_session.refresh(job)
+
+    # A generic status update is never allowed to finalise a worker job.
+    with pytest.raises(
+        ValueError,
+        match="persist_findings_and_finish_job",
+    ):
+        repository.update_job_status(
+            organization_id=organization.id,
+            job_id=job.id,
+            expected_status="processing",
+            new_status="failed",
+            error_code="WORKER_ERROR",
+            error_message="Failure from stale attempt",
+            claimed_attempt=1,
+        )
+
+    # The real finaliser rejects the stale claimed-attempt token.
+    # An empty findings list is valid for an unrecoverable worker failure.
+    finalized = repository.persist_findings_and_finish_job(
+        organization_id=organization.id,
+        job_id=job.id,
+        submission_version_id=version.id,
+        claimed_attempt=1,
+        findings=[],
+        final_status="failed",
+        error_code="WORKER_ERROR",
+        error_message="Failure from stale attempt",
+    )
+
+    assert finalized is False
+
+    db_session.refresh(job)
+    assert job.status == "processing"
+    assert job.attempts == 2
+    assert job.error_code is None
+    assert job.error_message is None
 
 
 def test_empty_idempotency_key_is_rejected(db_session):
@@ -541,6 +748,139 @@ def test_fact_version_from_another_organization_is_rejected(db_session):
             findings=[
                 create_finding(
                     source_fact_version_id=other_fact_version.id
+                )
+            ],
+            final_status="completed",
+        )
+
+
+def test_archived_approved_source_versions_remain_valid_for_inflight_analysis(
+    db_session,
+):
+    organization, user = create_org_user(db_session)
+    _, submission_version = create_submission_version(
+        db_session,
+        organization,
+        user,
+    )
+
+    _, rule_version = create_rule_version(
+        db_session,
+        organization,
+        user,
+        status="approved",
+    )
+    _, fact_version = create_fact_version(
+        db_session,
+        organization,
+        user,
+        status="approved",
+    )
+
+    repository = AnalysisJobRepository(db_session)
+
+    job = repository.create_or_get_analysis_job(
+        organization_id=organization.id,
+        submission_version_id=submission_version.id,
+        idempotency_key="archive-during-analysis",
+    )
+    claimed = repository.claim_queued_job(job.id)
+    assert claimed is not None
+
+    # These versions were approved when selected by the worker, then
+    # archived while the analysis was still processing.
+    rule_version.status = "archived"
+    fact_version.status = "archived"
+    db_session.flush()
+
+    finalized = repository.persist_findings_and_finish_job(
+        organization_id=organization.id,
+        job_id=job.id,
+        submission_version_id=submission_version.id,
+        claimed_attempt=claimed.attempts,
+        findings=[
+            create_finding(
+                source_rule_version_id=rule_version.id,
+                source_fact_version_id=fact_version.id,
+            )
+        ],
+        final_status="completed",
+    )
+
+    assert finalized is True
+
+    saved_finding = db_session.scalar(
+        select(Finding).where(
+            Finding.analysis_job_id == job.id,
+            Finding.finding_fingerprint == "finding-001",
+        )
+    )
+
+    assert saved_finding is not None
+    assert saved_finding.source_rule_version_id == rule_version.id
+    assert saved_finding.source_fact_version_id == fact_version.id
+
+
+def test_archived_rule_without_approval_metadata_is_rejected(db_session):
+    organization, user = create_org_user(db_session)
+    repository, job, version, claimed = create_claimed_job(
+        db_session,
+        organization,
+        user,
+        "source-archived-unapproved-rule",
+    )
+    _, rule_version = create_rule_version(
+        db_session,
+        organization,
+        user,
+        status="archived",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="previously approved rule version",
+    ):
+        repository.persist_findings_and_finish_job(
+            organization_id=organization.id,
+            job_id=job.id,
+            submission_version_id=version.id,
+            claimed_attempt=claimed.attempts,
+            findings=[
+                create_finding(
+                    source_rule_version_id=rule_version.id
+                )
+            ],
+            final_status="completed",
+        )
+
+
+def test_archived_fact_without_approval_metadata_is_rejected(db_session):
+    organization, user = create_org_user(db_session)
+    repository, job, version, claimed = create_claimed_job(
+        db_session,
+        organization,
+        user,
+        "source-archived-unapproved-fact",
+    )
+    _, fact_version = create_fact_version(
+        db_session,
+        organization,
+        user,
+        status="archived",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="previously approved fact version",
+    ):
+        repository.persist_findings_and_finish_job(
+            organization_id=organization.id,
+            job_id=job.id,
+            submission_version_id=version.id,
+            claimed_attempt=claimed.attempts,
+            findings=[
+                create_finding(
+                    source_fact_version_id=fact_version.id
                 )
             ],
             final_status="completed",

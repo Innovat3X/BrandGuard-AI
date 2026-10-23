@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -109,6 +108,187 @@ def test_list_rules_is_organization_scoped(db_session):
 
     assert [item.id for item in organization_rules] == [rule.id]
     assert [item.id for item in other_rules] == [other_rule.id]
+
+
+def test_update_draft_rule_updates_title_and_latest_draft(db_session):
+    organization, user = create_org_user(db_session)
+    rule, original_version = create_rule(db_session, organization, user)
+    repository = BrandRuleRepository(db_session)
+
+    updated_rule, updated_version = repository.update_draft_rule(
+        organization_id=organization.id,
+        rule_id=rule.id,
+        title="Updated brand terminology",
+        category="messaging",
+        rule_text="Use the revised approved product wording.",
+        severity="high",
+        description="Updated messaging guidance",
+    )
+
+    assert updated_rule.id == rule.id
+    assert updated_rule.title == "Updated brand terminology"
+
+    assert updated_version.id == original_version.id
+    assert updated_version.version_number == 1
+    assert updated_version.status == "draft"
+    assert updated_version.category == "messaging"
+    assert updated_version.rule_text == (
+        "Use the revised approved product wording."
+    )
+    assert updated_version.severity == "high"
+    assert updated_version.description == "Updated messaging guidance"
+
+    versions = repository.list_rule_versions(organization.id, rule.id)
+    assert versions is not None
+    assert len(versions) == 1
+
+
+def test_update_draft_rule_returns_none_for_wrong_organization(
+    db_session,
+):
+    organization, user = create_org_user(db_session)
+    rule, version = create_rule(db_session, organization, user)
+
+    other_organization, _ = create_org_user(db_session)
+    repository = BrandRuleRepository(db_session)
+
+    result = repository.update_draft_rule(
+        organization_id=other_organization.id,
+        rule_id=rule.id,
+        title="Should not be applied",
+        category="tone",
+        rule_text="This must not change the original rule.",
+        severity="low",
+        description=None,
+    )
+
+    assert result is None
+
+    db_session.refresh(rule)
+    db_session.refresh(version)
+
+    assert rule.title == "Approved terminology"
+    assert version.rule_text == "Use the approved product name."
+    assert version.status == "draft"
+
+
+def test_update_draft_rule_rejects_approved_version(db_session):
+    organization, user = create_org_user(db_session)
+    rule, version = create_rule(db_session, organization, user)
+    approve_version(db_session, organization, rule, version, user)
+
+    original_title = rule.title
+    original_text = version.rule_text
+    original_approved_at = version.approved_at
+    original_approved_by = version.approved_by
+
+    repository = BrandRuleRepository(db_session)
+
+    with pytest.raises(ValueError, match="latest draft rule version"):
+        repository.update_draft_rule(
+            organization_id=organization.id,
+            rule_id=rule.id,
+            title="Attempted overwrite",
+            category="tone",
+            rule_text="Attempted overwrite of approved history.",
+            severity="high",
+            description="Attempted overwrite",
+        )
+
+    db_session.refresh(rule)
+    db_session.refresh(version)
+
+    assert rule.title == original_title
+    assert version.rule_text == original_text
+    assert version.status == "approved"
+    assert version.approved_at == original_approved_at
+    assert version.approved_by == original_approved_by
+
+
+def test_update_draft_rule_rejects_when_latest_version_is_approved(
+    db_session,
+):
+    organization, user = create_org_user(db_session)
+    rule, version1 = create_rule(db_session, organization, user)
+
+    approve_version(db_session, organization, rule, version1, user)
+
+    repository = BrandRuleRepository(db_session)
+    version2 = repository.create_rule_version(
+        organization_id=organization.id,
+        rule_id=rule.id,
+        category="terminology",
+        rule_text="Second version awaiting approval.",
+        severity="medium",
+        created_by=user.id,
+    )
+    approve_version(db_session, organization, rule, version2, user)
+
+    original_title = rule.title
+    original_version1_text = version1.rule_text
+    original_version2_text = version2.rule_text
+
+    with pytest.raises(ValueError, match="latest draft rule version"):
+        repository.update_draft_rule(
+            organization_id=organization.id,
+            rule_id=rule.id,
+            title="Attempted overwrite",
+            category="tone",
+            rule_text="Must not overwrite approved version 2.",
+            severity="high",
+            description=None,
+        )
+
+    db_session.refresh(rule)
+    db_session.refresh(version1)
+    db_session.refresh(version2)
+
+    assert rule.title == original_title
+    assert version1.status == "approved"
+    assert version1.rule_text == original_version1_text
+    assert version2.status == "approved"
+    assert version2.rule_text == original_version2_text
+
+
+def test_update_draft_rule_rejects_invalid_fields(db_session):
+    organization, user = create_org_user(db_session)
+    rule, version = create_rule(db_session, organization, user)
+    repository = BrandRuleRepository(db_session)
+
+    with pytest.raises(ValueError, match="Unsupported rule category"):
+        repository.update_draft_rule(
+            organization_id=organization.id,
+            rule_id=rule.id,
+            title="Valid title",
+            category="invalid",
+            rule_text="Valid text",
+            severity="medium",
+        )
+
+    with pytest.raises(ValueError, match="Unsupported rule severity"):
+        repository.update_draft_rule(
+            organization_id=organization.id,
+            rule_id=rule.id,
+            title="Valid title",
+            category="tone",
+            rule_text="Valid text",
+            severity="critical",
+        )
+
+    with pytest.raises(ValueError, match="Rule text must not be empty"):
+        repository.update_draft_rule(
+            organization_id=organization.id,
+            rule_id=rule.id,
+            title="Valid title",
+            category="tone",
+            rule_text=" ",
+            severity="medium",
+        )
+
+    db_session.refresh(rule)
+    db_session.refresh(version)
+    assert rule.title == "Approved terminology"
+    assert version.rule_text == "Use the approved product name."
 
 
 def test_new_version_preserves_existing_version(db_session):
