@@ -1,3 +1,4 @@
+
 from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID, uuid4
@@ -62,9 +63,8 @@ REQUIRED_FINDING_FIELDS = {
 class AnalysisJobRepository:
     """Persistence operations for analysis jobs and their findings.
 
-    The application service owns the transaction boundary and commits.
-    Methods in this repository flush or execute database statements but
-    never commit independently.
+    Application services own transaction boundaries and commits.
+    This repository never commits a transaction independently.
     """
 
     def __init__(self, session: Session) -> None:
@@ -77,10 +77,10 @@ class AnalysisJobRepository:
         idempotency_key: str,
         requested_checks: dict[str, Any] | list[Any] | None = None,
     ) -> AnalysisJob:
-        """Create a queued job, or return the existing matching request.
+        """Create a queued job or return its existing idempotent request.
 
-        Reusing an idempotency key for a different submission version or
-        different requested checks is rejected.
+        Reusing an idempotency key for a different submission version
+        or requested-check configuration is rejected.
         """
         if not idempotency_key.strip():
             raise ValueError("Idempotency key must not be empty.")
@@ -155,12 +155,19 @@ class AnalysisJobRepository:
             )
         )
 
-    def claim_queued_job(self, job_id: UUID) -> AnalysisJob | None:
-        """Atomically claim a queued job and increment its attempt count.
+    def claim_queued_job(
+        self,
+        job_id: UUID,
+    ) -> AnalysisJob | None:
+        """Atomically claim a queued job using its persisted identity.
 
-        Returns None when the job does not exist or another worker has
-        already claimed it. The worker must use the returned attempts
-        value as its claimed-attempt token during finalization.
+        Queue messages carry the job ID. The organisation scope is
+        derived from the persisted job row returned by the atomic
+        update, rather than supplied by the queue message.
+
+        Returns None when the job does not exist or has already been
+        claimed by another worker. The returned attempts value is the
+        claimed-attempt token for stale-worker protection.
         """
         statement = (
             update(AnalysisJob)
@@ -180,17 +187,25 @@ class AnalysisJobRepository:
                 error_message=None,
                 updated_at=func.now(),
             )
-            .returning(AnalysisJob.id)
+            .returning(
+                AnalysisJob.id,
+                AnalysisJob.organization_id,
+            )
         )
 
-        claimed_id = self._session.scalar(statement)
+        claimed_row = self._session.execute(statement).one_or_none()
 
-        if claimed_id is None:
+        if claimed_row is None:
             return None
+
+        claimed_id, claimed_organization_id = claimed_row
 
         return self._session.scalar(
             select(AnalysisJob)
-            .where(AnalysisJob.id == claimed_id)
+            .where(
+                AnalysisJob.organization_id == claimed_organization_id,
+                AnalysisJob.id == claimed_id,
+            )
             .execution_options(populate_existing=True)
         )
 
@@ -203,24 +218,30 @@ class AnalysisJobRepository:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> AnalysisJob | None:
-        """Conditionally update a job status using organization scope.
+        """Conditionally change a job status within its organization.
 
-        Returns None when the job is absent or its status no longer
-        matches expected_status. Final outcomes with findings should use
+        Returns None if the job is absent or its current status differs
+        from expected_status. Finalisation with findings should use
         persist_findings_and_finish_job() instead.
         """
         if expected_status not in JOB_STATUSES:
-            raise ValueError(f"Unsupported expected job status: {expected_status}")
+            raise ValueError(
+                f"Unsupported expected job status: {expected_status}"
+            )
 
         if new_status not in JOB_STATUSES:
-            raise ValueError(f"Unsupported new job status: {new_status}")
+            raise ValueError(
+                f"Unsupported new job status: {new_status}"
+            )
 
         values: dict[str, Any] = {
             "status": new_status,
             "error_code": error_code,
             "error_message": error_message,
             "completed_at": (
-                func.now() if new_status in TERMINAL_JOB_STATUSES else None
+                func.now()
+                if new_status in TERMINAL_JOB_STATUSES
+                else None
             ),
             "updated_at": func.now(),
         }
@@ -262,21 +283,26 @@ class AnalysisJobRepository:
         error_message: str | None = None,
         submission_status: str | None = None,
     ) -> bool:
-        """Persist findings and finalize the claimed job atomically.
+        """Persist findings and finalise the claimed job in one transaction.
 
-        Returns False if the job is no longer processing or the worker's
-        claimed attempt is stale. In that case, no findings are written.
+        Returns False if the job is no longer processing or the attempt
+        token is stale. In that case, no findings are written.
 
-        Duplicate finding fingerprints within the same job are ignored.
-        The optional submission status is updated only if the analyzed
-        version is still the submission's current version.
+        Duplicate fingerprints within the same job are ignored.
+        Submission status is updated only if the analysed version is
+        still the submission's current version.
+
+        The application service must commit or roll back the transaction.
         """
         if final_status not in TERMINAL_JOB_STATUSES:
             raise ValueError(
                 "Final status must be completed, partial, or failed."
             )
 
-        if submission_status is not None and submission_status not in SUBMISSION_STATUSES:
+        if (
+            submission_status is not None
+            and submission_status not in SUBMISSION_STATUSES
+        ):
             raise ValueError(
                 f"Unsupported submission status: {submission_status}"
             )
@@ -285,6 +311,7 @@ class AnalysisJobRepository:
 
         for index, finding in enumerate(findings):
             unknown_fields = set(finding) - FINDING_FIELDS
+
             if unknown_fields:
                 raise ValueError(
                     f"Finding at index {index} contains unsupported fields: "
@@ -292,15 +319,18 @@ class AnalysisJobRepository:
                 )
 
             missing_fields = REQUIRED_FINDING_FIELDS - set(finding)
+
             if missing_fields:
                 raise ValueError(
                     f"Finding at index {index} is missing required fields: "
                     f"{sorted(missing_fields)}"
                 )
 
-            if not finding["finding_fingerprint"]:
+            fingerprint = finding["finding_fingerprint"]
+
+            if not isinstance(fingerprint, str) or not fingerprint.strip():
                 raise ValueError(
-                    f"Finding at index {index} has an empty fingerprint."
+                    f"Finding at index {index} has an empty or invalid fingerprint."
                 )
 
             prepared_findings.append(dict(finding))
@@ -367,11 +397,15 @@ class AnalysisJobRepository:
                 "submission_version_id": submission_version_id,
             }
 
-            statement = insert(Finding).values(**values).on_conflict_do_nothing(
-                index_elements=[
-                    Finding.analysis_job_id,
-                    Finding.finding_fingerprint,
-                ]
+            statement = (
+                insert(Finding)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        Finding.analysis_job_id,
+                        Finding.finding_fingerprint,
+                    ]
+                )
             )
 
             self._session.execute(statement)

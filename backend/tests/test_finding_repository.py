@@ -5,7 +5,6 @@ from sqlalchemy import select
 from app.infrastructure.db import (
     Finding,
     Organization,
-    SubmissionVersion,
     User,
 )
 from app.infrastructure.db.repositories.analysis_job_repository import (
@@ -21,7 +20,10 @@ from app.infrastructure.db.repositories.submission_repository import (
 
 def create_org_user(db_session):
     suffix = uuid4().hex
-    organization = Organization(name=f"Test Organization {suffix}")
+
+    organization = Organization(
+        name=f"Test Organization {suffix}"
+    )
     user = User(
         full_name="Test User",
         email=f"{suffix}@example.com",
@@ -34,7 +36,11 @@ def create_org_user(db_session):
     return organization, user
 
 
-def create_submission_and_version(db_session, organization, user):
+def create_submission_and_version(
+    db_session,
+    organization,
+    user,
+):
     repository = SubmissionRepository(db_session)
 
     submission = repository.create_submission(
@@ -56,7 +62,12 @@ def create_submission_and_version(db_session, organization, user):
     return submission, version
 
 
-def persist_test_finding(db_session, organization, version, fingerprint):
+def persist_test_finding(
+    db_session,
+    organization,
+    version,
+    fingerprint,
+):
     jobs = AnalysisJobRepository(db_session)
 
     job = jobs.create_or_get_analysis_job(
@@ -65,7 +76,10 @@ def persist_test_finding(db_session, organization, version, fingerprint):
         idempotency_key=f"test-{uuid4().hex}",
     )
 
+    # The worker receives the job ID and derives its organization
+    # from the persisted job record.
     claimed = jobs.claim_queued_job(job.id)
+
     assert claimed is not None
 
     success = jobs.persist_findings_and_finish_job(
@@ -78,7 +92,9 @@ def persist_test_finding(db_session, organization, version, fingerprint):
                 "category": "tone",
                 "severity": "medium",
                 "result": "conflict",
-                "explanation": "Test finding for repository verification.",
+                "explanation": (
+                    "Test finding for repository verification."
+                ),
                 "detection_method": "deterministic",
                 "requires_human_review": True,
                 "finding_fingerprint": fingerprint,
@@ -86,6 +102,7 @@ def persist_test_finding(db_session, organization, version, fingerprint):
         ],
         final_status="completed",
     )
+
     assert success is True
 
     return db_session.scalar(
@@ -98,8 +115,11 @@ def persist_test_finding(db_session, organization, version, fingerprint):
 
 def test_findings_are_isolated_by_submission_version(db_session):
     organization, user = create_org_user(db_session)
+
     submission, version1 = create_submission_and_version(
-        db_session, organization, user
+        db_session,
+        organization,
+        user,
     )
 
     submissions = SubmissionRepository(db_session)
@@ -113,6 +133,7 @@ def test_findings_are_isolated_by_submission_version(db_session):
         created_by=user.id,
         original_text="Revised submission text",
     )
+
     submissions.update_current_version(
         organization_id=organization.id,
         submission_id=submission.id,
@@ -120,10 +141,17 @@ def test_findings_are_isolated_by_submission_version(db_session):
     )
 
     finding1 = persist_test_finding(
-        db_session, organization, version1, "finding-version-1"
+        db_session,
+        organization,
+        version1,
+        "finding-version-1",
     )
+
     finding2 = persist_test_finding(
-        db_session, organization, version2, "finding-version-2"
+        db_session,
+        organization,
+        version2,
+        "finding-version-2",
     )
 
     repository = FindingRepository(db_session)
@@ -133,6 +161,7 @@ def test_findings_are_isolated_by_submission_version(db_session):
         submission_id=submission.id,
         version_number=1,
     )
+
     version2_findings = repository.list_for_submission_version(
         organization_id=organization.id,
         submission_id=submission.id,
@@ -141,14 +170,24 @@ def test_findings_are_isolated_by_submission_version(db_session):
 
     assert version1_findings is not None
     assert version2_findings is not None
-    assert [item.id for item in version1_findings] == [finding1.id]
-    assert [item.id for item in version2_findings] == [finding2.id]
+
+    assert [item.id for item in version1_findings] == [
+        finding1.id
+    ]
+    assert [item.id for item in version2_findings] == [
+        finding2.id
+    ]
 
 
-def test_existing_version_without_findings_returns_empty_list(db_session):
+def test_existing_version_without_findings_returns_empty_list(
+    db_session,
+):
     organization, user = create_org_user(db_session)
+
     submission, _ = create_submission_and_version(
-        db_session, organization, user
+        db_session,
+        organization,
+        user,
     )
 
     repository = FindingRepository(db_session)
@@ -164,8 +203,11 @@ def test_existing_version_without_findings_returns_empty_list(db_session):
 
 def test_missing_version_returns_none(db_session):
     organization, user = create_org_user(db_session)
+
     submission, _ = create_submission_and_version(
-        db_session, organization, user
+        db_session,
+        organization,
+        user,
     )
 
     repository = FindingRepository(db_session)
@@ -181,17 +223,21 @@ def test_missing_version_returns_none(db_session):
 
 def test_findings_are_organization_scoped(db_session):
     organization, user = create_org_user(db_session)
+
     _, version = create_submission_and_version(
-        db_session, organization, user
+        db_session,
+        organization,
+        user,
     )
 
     finding = persist_test_finding(
-        db_session, organization, version, "organization-scoped-finding"
+        db_session,
+        organization,
+        version,
+        "organization-scoped-finding",
     )
 
-    other_organization = Organization(name="Unrelated Organization")
-    db_session.add(other_organization)
-    db_session.flush()
+    other_organization, _ = create_org_user(db_session)
 
     repository = FindingRepository(db_session)
 
@@ -209,12 +255,18 @@ def test_findings_are_organization_scoped(db_session):
 
 def test_get_finding_returns_record_within_organization(db_session):
     organization, user = create_org_user(db_session)
+
     _, version = create_submission_and_version(
-        db_session, organization, user
+        db_session,
+        organization,
+        user,
     )
 
     finding = persist_test_finding(
-        db_session, organization, version, "lookup-finding"
+        db_session,
+        organization,
+        version,
+        "lookup-finding",
     )
 
     repository = FindingRepository(db_session)
