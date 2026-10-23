@@ -272,7 +272,8 @@ export default function Home() {
             </div>
             <div>
               <p className="text-lg font-semibold tracking-tight text-slate-900">
-                Inkloom<span className="text-violet-600"> AI</span>
+                BrandGuard<span className="text-violet-600"> AI</span>
+                
               </p>
               <p className="text-xs text-slate-500">Brand Governance</p>
             </div>
@@ -774,7 +775,7 @@ export default function Home() {
               </div>
             )}
             <footer className="border-t border-slate-200 pt-4 text-xs leading-5 text-slate-400">
-              Inkloom AI · Frontend prototype · Demo records are illustrative and do not represent live backend data.
+              BrandGuard AI · Frontend prototype · Demo records are illustrative and do not represent live backend data.
             </footer>
           </div>
         </section>
