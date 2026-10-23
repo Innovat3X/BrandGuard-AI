@@ -1,3 +1,13 @@
+from app.analysis.claims import (
+    StructuredApprovedFact,
+    StructuredClaim,
+)
+from app.analysis.pipeline import (
+    aggregate_findings,
+    build_analysis_response,
+    run_analysis,
+    run_terminology_slice,
+)
 from uuid import UUID
 
 from app.analysis.contracts import (
@@ -125,3 +135,120 @@ def test_summary_matches_aggregated_findings():
     assert len(response.findings) == 1
     assert response.summary.medium == 1
     assert response.summary.total == 1
+    
+FACT_VERSION_ID = UUID("66666666-6666-4666-8666-666666666666")
+
+
+def make_price_claim(text: str) -> StructuredClaim:
+    value = "₹1200"
+    start = text.index(value)
+
+    return StructuredClaim(
+        fact_key="product_price",
+        claimed_value=value,
+        comparison_value="1200 INR",
+        source_text=text,
+        start_offset=start,
+        end_offset=start + len(value),
+        severity=Severity.HIGH,
+    )
+
+
+def make_price_fact() -> StructuredApprovedFact:
+    return StructuredApprovedFact(
+        source_fact_version_id=FACT_VERSION_ID,
+        fact_key="product_price",
+        approved_value="₹999",
+        comparison_value="999 INR",
+        fact_text="The approved product price is ₹999.",
+        source_url="https://example.com/price",
+        source_name="Approved pricing record",
+        status="approved",
+    )
+
+
+def test_run_analysis_combines_terminology_and_claim_findings():
+    text = "Our product is cheap at ₹1200."
+
+    result = run_analysis(
+        job_id=JOB_ID,
+        submission_id=SUBMISSION_ID,
+        submission_version_id=VERSION_ID,
+        content_text=text,
+        terminology_rules=[make_rule()],
+        claims=[make_price_claim(text)],
+        approved_facts=[make_price_fact()],
+        fact_lookup_completed=True,
+    )
+
+    assert result.status == "completed"
+    assert len(result.findings) == 2
+    assert result.summary.medium == 1
+    assert result.summary.high == 1
+    assert result.summary.total == 2
+
+    claim_finding = next(
+        item for item in result.findings
+        if item.category == FindingCategory.FACTUAL_CLAIM
+    )
+    assert claim_finding.result == FindingResult.CONFLICT
+    assert claim_finding.source_fact_version_id == FACT_VERSION_ID
+
+
+def test_run_analysis_marks_missing_rules_unavailable():
+    result = run_analysis(
+        job_id=JOB_ID,
+        submission_id=SUBMISSION_ID,
+        submission_version_id=VERSION_ID,
+        content_text="Our product is excellent.",
+        terminology_rules=None,
+        claims=[],
+        fact_lookup_completed=True,
+    )
+
+    assert result.status == "partial"
+    assert any(
+        item.result == FindingResult.CHECK_UNAVAILABLE
+        and item.category == FindingCategory.TERMINOLOGY
+        for item in result.findings
+    )
+
+
+def test_run_analysis_marks_missing_claim_extraction_unavailable():
+    result = run_analysis(
+        job_id=JOB_ID,
+        submission_id=SUBMISSION_ID,
+        submission_version_id=VERSION_ID,
+        content_text="Our product is cheap.",
+        terminology_rules=[make_rule()],
+        claims=None,
+    )
+
+    assert result.status == "partial"
+    assert any(
+        item.result == FindingResult.CHECK_UNAVAILABLE
+        and item.category == FindingCategory.FACTUAL_CLAIM
+        for item in result.findings
+    )
+
+
+def test_run_analysis_marks_failed_fact_lookup_partial():
+    text = "Our product is cheap at ₹1200."
+
+    result = run_analysis(
+        job_id=JOB_ID,
+        submission_id=SUBMISSION_ID,
+        submission_version_id=VERSION_ID,
+        content_text=text,
+        terminology_rules=[make_rule()],
+        claims=[make_price_claim(text)],
+        approved_facts=[],
+        fact_lookup_completed=False,
+    )
+
+    assert result.status == "partial"
+    assert any(
+        item.result == FindingResult.CHECK_UNAVAILABLE
+        and item.category == FindingCategory.FACTUAL_CLAIM
+        for item in result.findings
+    )

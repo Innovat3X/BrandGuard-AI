@@ -1,8 +1,14 @@
+
 import json
 from collections.abc import Sequence
 from typing import Literal
 from uuid import UUID
 
+from app.analysis.claims import (
+    StructuredApprovedFact,
+    StructuredClaim,
+    check_claims,
+)
 from app.analysis.contracts import (
     AnalysisResponse,
     DetectionMethod,
@@ -20,7 +26,7 @@ from app.analysis.terminology import (
 
 
 def _finding_signature(finding: Finding) -> str:
-    """Create a stable signature for logical finding deduplication."""
+    """Create a stable signature for report-level deduplication."""
 
     signature = {
         "category": finding.category.value,
@@ -47,17 +53,13 @@ def _finding_signature(finding: Finding) -> str:
         "suggested_correction": finding.suggested_correction,
     }
 
-    return json.dumps(
-        signature,
-        sort_keys=True,
-        ensure_ascii=False,
-    )
+    return json.dumps(signature, sort_keys=True, ensure_ascii=False)
 
 
 def aggregate_findings(
     *finding_groups: Sequence[Finding],
 ) -> list[Finding]:
-    """Combine finding groups and remove logical duplicates."""
+    """Combine findings and remove logical duplicates within one report."""
 
     aggregated: list[Finding] = []
     seen: set[str] = set()
@@ -66,11 +68,9 @@ def aggregate_findings(
         for finding in group:
             signature = _finding_signature(finding)
 
-            if signature in seen:
-                continue
-
-            seen.add(signature)
-            aggregated.append(finding)
+            if signature not in seen:
+                seen.add(signature)
+                aggregated.append(finding)
 
     return aggregated
 
@@ -83,7 +83,7 @@ def build_analysis_response(
     findings: Sequence[Finding],
     status: Literal["completed", "partial"],
 ) -> AnalysisResponse:
-    """Build the response using the shared analysis-result contract."""
+    """Construct the response defined by analysis-result.md."""
 
     combined = aggregate_findings(findings)
 
@@ -97,6 +97,25 @@ def build_analysis_response(
     )
 
 
+def _unavailable_finding(
+    *,
+    category: FindingCategory,
+    explanation: str,
+    source_name: str,
+) -> Finding:
+    """Represent a check that could not be completed."""
+
+    return Finding(
+        category=category,
+        severity=Severity.INFO,
+        result=FindingResult.CHECK_UNAVAILABLE,
+        explanation=explanation,
+        evidence=Evidence(source_name=source_name),
+        detection_method=DetectionMethod.DETERMINISTIC,
+        requires_human_review=True,
+    )
+
+
 def run_terminology_slice(
     *,
     job_id: UUID,
@@ -105,27 +124,16 @@ def run_terminology_slice(
     content_text: str,
     terminology_rules: Sequence[ApprovedTerminologyRule],
 ) -> AnalysisResponse:
-    """
-    Run the first terminology-only analysis slice.
-
-    This is not yet the full brand-governance pipeline.
-    """
+    """Run the initial terminology-only analysis slice."""
 
     if not terminology_rules:
-        finding = Finding(
+        finding = _unavailable_finding(
             category=FindingCategory.TERMINOLOGY,
-            severity=Severity.INFO,
-            result=FindingResult.CHECK_UNAVAILABLE,
             explanation=(
-                "No applicable approved terminology rules were "
-                "supplied, so terminology compliance could not "
-                "be assessed."
+                "No applicable approved terminology rules were supplied; "
+                "terminology compliance could not be assessed."
             ),
-            evidence=Evidence(
-                source_name="Approved terminology rules",
-            ),
-            detection_method=DetectionMethod.DETERMINISTIC,
-            requires_human_review=True,
+            source_name="Approved terminology rules",
         )
 
         return build_analysis_response(
@@ -136,10 +144,7 @@ def run_terminology_slice(
             status="partial",
         )
 
-    findings = check_terminology(
-        content_text,
-        terminology_rules,
-    )
+    findings = check_terminology(content_text, terminology_rules)
 
     return build_analysis_response(
         job_id=job_id,
@@ -147,4 +152,88 @@ def run_terminology_slice(
         submission_version_id=submission_version_id,
         findings=findings,
         status="completed",
+    )
+
+
+def run_analysis(
+    *,
+    job_id: UUID,
+    submission_id: UUID,
+    submission_version_id: UUID,
+    content_text: str,
+    terminology_rules: Sequence[ApprovedTerminologyRule] | None,
+    claims: Sequence[StructuredClaim] | None,
+    approved_facts: Sequence[StructuredApprovedFact] = (),
+    fact_lookup_completed: bool = False,
+) -> AnalysisResponse:
+    """
+    Run the currently implemented terminology and claim checks.
+
+    None means the corresponding input/check is unavailable.
+    An empty claims list means claim extraction completed but found
+    no claim candidates.
+
+    The caller must retrieve applicable approved records using the
+    trusted organisation context and must not supply unapproved
+    records to this function.
+    """
+
+    findings: list[Finding] = []
+
+    # 1. Terminology check
+    if not terminology_rules:
+        findings.append(
+            _unavailable_finding(
+                category=FindingCategory.TERMINOLOGY,
+                explanation=(
+                    "No applicable approved terminology rules were "
+                    "supplied; terminology compliance could not be assessed."
+                ),
+                source_name="Approved terminology rules",
+            )
+        )
+    else:
+        findings.extend(
+            check_terminology(content_text, terminology_rules)
+        )
+
+    # 2. Claim extraction and approved-fact comparison
+    if claims is None:
+        findings.append(
+            _unavailable_finding(
+                category=FindingCategory.FACTUAL_CLAIM,
+                explanation=(
+                    "Structured claim extraction was unavailable, so "
+                    "claim verification could not be completed."
+                ),
+                source_name="Claim extraction",
+            )
+        )
+    elif claims:
+        findings.extend(
+            check_claims(
+                claims,
+                approved_facts,
+                fact_lookup_completed=fact_lookup_completed,
+            )
+        )
+
+    # An inconclusive result is still an evaluated check.
+    # An unavailable check means the overall analysis is partial.
+    combined = aggregate_findings(findings)
+    status: Literal["completed", "partial"] = (
+        "partial"
+        if any(
+            item.result == FindingResult.CHECK_UNAVAILABLE
+            for item in combined
+        )
+        else "completed"
+    )
+
+    return build_analysis_response(
+        job_id=job_id,
+        submission_id=submission_id,
+        submission_version_id=submission_version_id,
+        findings=combined,
+        status=status,
     )
