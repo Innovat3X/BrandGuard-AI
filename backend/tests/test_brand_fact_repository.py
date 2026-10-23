@@ -1,9 +1,10 @@
+
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
-from app.infrastructure.db import BrandFact, BrandFactVersion, Organization, User
+from app.infrastructure.db import Organization, User
 from app.infrastructure.db.repositories.brand_fact_repository import (
     BrandFactRepository,
 )
@@ -11,47 +12,71 @@ from app.infrastructure.db.repositories.brand_fact_repository import (
 
 def create_org_user(db_session):
     suffix = uuid4().hex
-
-    organization = Organization(name=f"Test Organization {suffix}")
+    organization = Organization(name=f"Fact Test Organization {suffix}")
     user = User(
         full_name="Brand Fact Test User",
         email=f"{suffix}@example.com",
         password_hash="test-password-hash",
     )
-
     db_session.add_all([organization, user])
     db_session.flush()
-
     return organization, user
 
 
 def create_fact(db_session, organization, user):
     repository = BrandFactRepository(db_session)
-
     return repository.create_fact(
         organization_id=organization.id,
-        label="Product price",
-        fact_text="The approved product price is ₹999.",
+        label="Official product name",
+        fact_text="The approved product name is FreshTag.",
         created_by=user.id,
-        source_url="https://example.com/source",
+        source_url="https://example.com/product",
+    )
+
+
+def approve_version(db_session, organization, fact, version, user):
+    repository = BrandFactRepository(db_session)
+    return repository.approve_fact_version(
+        organization_id=organization.id,
+        fact_id=fact.id,
+        version_number=version.version_number,
+        approved_by=user.id,
+    )
+
+
+def create_version(
+    db_session,
+    organization,
+    fact,
+    user,
+    fact_text,
+    effective_from=None,
+    expires_at=None,
+):
+    repository = BrandFactRepository(db_session)
+    return repository.create_fact_version(
+        organization_id=organization.id,
+        fact_id=fact.id,
+        fact_text=fact_text,
+        created_by=user.id,
+        effective_from=effective_from,
+        expires_at=expires_at,
     )
 
 
 def test_create_fact_creates_first_draft_version(db_session):
     organization, user = create_org_user(db_session)
-
     fact, version = create_fact(db_session, organization, user)
 
     assert fact.id is not None
     assert fact.organization_id == organization.id
-    assert fact.label == "Product price"
-
+    assert fact.label == "Official product name"
     assert version.fact_id == fact.id
     assert version.organization_id == organization.id
     assert version.version_number == 1
     assert version.status == "draft"
-    assert version.fact_text == "The approved product price is ₹999."
-    assert version.source_url == "https://example.com/source"
+    assert version.fact_text == "The approved product name is FreshTag."
+    assert version.source_url == "https://example.com/product"
     assert version.created_by == user.id
     assert version.approved_by is None
     assert version.approved_at is None
@@ -60,19 +85,23 @@ def test_create_fact_creates_first_draft_version(db_session):
 def test_fact_reads_are_organization_scoped(db_session):
     organization, user = create_org_user(db_session)
     fact, version = create_fact(db_session, organization, user)
-
     other_organization, _ = create_org_user(db_session)
+
     repository = BrandFactRepository(db_session)
 
     assert repository.get_fact(organization.id, fact.id) is not None
     assert repository.get_fact(other_organization.id, fact.id) is None
 
     assert (
-        repository.get_fact_version(organization.id, fact.id, 1)
+        repository.get_fact_version(
+            organization.id, fact.id, version.version_number
+        )
         is not None
     )
     assert (
-        repository.get_fact_version(other_organization.id, fact.id, 1)
+        repository.get_fact_version(
+            other_organization.id, fact.id, version.version_number
+        )
         is None
     )
 
@@ -82,31 +111,29 @@ def test_list_facts_is_organization_scoped(db_session):
     fact, _ = create_fact(db_session, organization, user)
 
     other_organization, other_user = create_org_user(db_session)
-    other_fact, _ = create_fact(db_session, other_organization, other_user)
+    other_fact, _ = create_fact(
+        db_session, other_organization, other_user
+    )
 
     repository = BrandFactRepository(db_session)
 
-    assert [
-        item.id for item in repository.list_facts(organization.id)
-    ] == [fact.id]
+    own_facts = repository.list_facts(organization.id)
+    other_facts = repository.list_facts(other_organization.id)
 
-    assert [
-        item.id for item in repository.list_facts(other_organization.id)
-    ] == [other_fact.id]
+    assert [item.id for item in own_facts] == [fact.id]
+    assert [item.id for item in other_facts] == [other_fact.id]
 
 
-def test_new_fact_version_preserves_original_history(db_session):
+def test_new_version_preserves_existing_version(db_session):
     organization, user = create_org_user(db_session)
     fact, version1 = create_fact(db_session, organization, user)
 
-    repository = BrandFactRepository(db_session)
-
-    version2 = repository.create_fact_version(
-        organization_id=organization.id,
-        fact_id=fact.id,
-        fact_text="The revised approved product price is ₹1099.",
-        created_by=user.id,
-        source_url="https://example.com/revised-source",
+    version2 = create_version(
+        db_session,
+        organization,
+        fact,
+        user,
+        "The approved product name is FreshTag Tracker.",
     )
 
     assert version2.id != version1.id
@@ -115,18 +142,17 @@ def test_new_fact_version_preserves_original_history(db_session):
 
     db_session.refresh(version1)
     assert version1.version_number == 1
-    assert version1.fact_text == "The approved product price is ₹999."
+    assert version1.fact_text == "The approved product name is FreshTag."
     assert version1.status == "draft"
 
+    repository = BrandFactRepository(db_session)
     versions = repository.list_fact_versions(organization.id, fact.id)
 
     assert versions is not None
     assert [item.version_number for item in versions] == [1, 2]
 
 
-def test_create_version_rejects_fact_from_another_organization(
-    db_session,
-):
+def test_create_version_rejects_fact_from_another_organization(db_session):
     organization, user = create_org_user(db_session)
     fact, _ = create_fact(db_session, organization, user)
 
@@ -137,18 +163,16 @@ def test_create_version_rejects_fact_from_another_organization(
         repository.create_fact_version(
             organization_id=other_organization.id,
             fact_id=fact.id,
-            fact_text="A different organization's fact.",
+            fact_text="A fact from another organization.",
             created_by=other_user.id,
         )
 
 
-def test_list_fact_versions_returns_none_for_wrong_organization(
-    db_session,
-):
+def test_list_fact_versions_returns_none_for_wrong_organization(db_session):
     organization, user = create_org_user(db_session)
     fact, _ = create_fact(db_session, organization, user)
-
     other_organization, _ = create_org_user(db_session)
+
     repository = BrandFactRepository(db_session)
 
     assert (
@@ -161,13 +185,8 @@ def test_approve_draft_version_records_approval_metadata(db_session):
     organization, user = create_org_user(db_session)
     fact, version = create_fact(db_session, organization, user)
 
-    repository = BrandFactRepository(db_session)
-
-    approved = repository.approve_fact_version(
-        organization_id=organization.id,
-        fact_id=fact.id,
-        version_number=version.version_number,
-        approved_by=user.id,
+    approved = approve_version(
+        db_session, organization, fact, version, user
     )
 
     assert approved.status == "approved"
@@ -181,30 +200,21 @@ def test_reapproving_version_preserves_original_approval(db_session):
     organization, user = create_org_user(db_session)
     fact, version = create_fact(db_session, organization, user)
 
-    repository = BrandFactRepository(db_session)
-
-    first = repository.approve_fact_version(
-        organization_id=organization.id,
-        fact_id=fact.id,
-        version_number=version.version_number,
-        approved_by=user.id,
+    first = approve_version(
+        db_session, organization, fact, version, user
     )
     original_approved_at = first.approved_at
-    original_approver = first.approved_by
 
-    second = repository.approve_fact_version(
-        organization_id=organization.id,
-        fact_id=fact.id,
-        version_number=version.version_number,
-        approved_by=user.id,
+    second = approve_version(
+        db_session, organization, fact, version, user
     )
 
     assert second.status == "approved"
     assert second.approved_at == original_approved_at
-    assert second.approved_by == original_approver
+    assert second.approved_by == user.id
 
 
-def test_archived_fact_version_cannot_be_approved(db_session):
+def test_archived_version_cannot_be_approved(db_session):
     organization, user = create_org_user(db_session)
     fact, version = create_fact(db_session, organization, user)
 
@@ -222,33 +232,7 @@ def test_archived_fact_version_cannot_be_approved(db_session):
         )
 
 
-def test_approved_fact_listing_excludes_drafts_and_other_organizations(
-    db_session,
-):
-    organization, user = create_org_user(db_session)
-    fact, version = create_fact(db_session, organization, user)
-
-    repository = BrandFactRepository(db_session)
-
-    repository.approve_fact_version(
-        organization_id=organization.id,
-        fact_id=fact.id,
-        version_number=version.version_number,
-        approved_by=user.id,
-    )
-
-    other_organization, other_user = create_org_user(db_session)
-    other_fact, _ = create_fact(db_session, other_organization, other_user)
-
-    approved = repository.list_approved_fact_versions(organization.id)
-
-    assert len(approved) == 1
-    assert approved[0].fact_id == fact.id
-    assert approved[0].status == "approved"
-    assert all(item.fact_id != other_fact.id for item in approved)
-
-
-def test_create_fact_rejects_empty_label_or_fact_text(db_session):
+def test_create_fact_rejects_empty_label(db_session):
     organization, user = create_org_user(db_session)
     repository = BrandFactRepository(db_session)
 
@@ -256,46 +240,290 @@ def test_create_fact_rejects_empty_label_or_fact_text(db_session):
         repository.create_fact(
             organization_id=organization.id,
             label=" ",
-            fact_text="Valid fact text",
+            fact_text="A valid fact.",
             created_by=user.id,
         )
+
+
+def test_create_fact_rejects_empty_fact_text(db_session):
+    organization, user = create_org_user(db_session)
+    repository = BrandFactRepository(db_session)
 
     with pytest.raises(ValueError, match="Fact text"):
         repository.create_fact(
             organization_id=organization.id,
-            label="Valid label",
+            label="Product name",
             fact_text=" ",
             created_by=user.id,
         )
 
 
-def test_fact_dates_must_be_timezone_aware(db_session):
+def test_create_version_rejects_empty_fact_text(db_session):
+    organization, user = create_org_user(db_session)
+    fact, _ = create_fact(db_session, organization, user)
+    repository = BrandFactRepository(db_session)
+
+    with pytest.raises(ValueError, match="Fact text"):
+        repository.create_fact_version(
+            organization_id=organization.id,
+            fact_id=fact.id,
+            fact_text=" ",
+            created_by=user.id,
+        )
+
+
+def test_create_fact_rejects_naive_effective_date(db_session):
     organization, user = create_org_user(db_session)
     repository = BrandFactRepository(db_session)
 
     with pytest.raises(ValueError, match="timezone-aware"):
         repository.create_fact(
             organization_id=organization.id,
-            label="Timed fact",
-            fact_text="Valid fact text",
+            label="Product name",
+            fact_text="A valid fact.",
             created_by=user.id,
-            effective_from=datetime(2026, 1, 1),
+            effective_from=datetime(2026, 4, 1),
         )
 
 
-def test_fact_expiry_must_follow_effective_date(db_session):
+def test_create_fact_rejects_expiry_before_effective_date(db_session):
     organization, user = create_org_user(db_session)
     repository = BrandFactRepository(db_session)
-
-    effective_from = datetime(2026, 5, 1, tzinfo=timezone.utc)
-    expires_at = effective_from - timedelta(days=1)
 
     with pytest.raises(ValueError, match="later than effective_from"):
         repository.create_fact(
             organization_id=organization.id,
-            label="Timed fact",
-            fact_text="Valid fact text",
+            label="Product name",
+            fact_text="A valid fact.",
             created_by=user.id,
-            effective_from=effective_from,
-            expires_at=expires_at,
+            effective_from=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
         )
+
+
+def test_active_facts_exclude_drafts(db_session):
+    organization, user = create_org_user(db_session)
+    create_fact(db_session, organization, user)
+
+    repository = BrandFactRepository(db_session)
+
+    assert (
+        repository.list_active_fact_versions(
+            organization_id=organization.id
+        )
+        == []
+    )
+
+
+def test_active_facts_return_approved_versions(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version = create_fact(db_session, organization, user)
+    approve_version(db_session, organization, fact, version, user)
+
+    repository = BrandFactRepository(db_session)
+    active = repository.list_active_fact_versions(
+        organization_id=organization.id
+    )
+
+    assert len(active) == 1
+    assert active[0].fact_id == fact.id
+    assert active[0].version_number == 1
+    assert active[0].status == "approved"
+
+
+def test_active_facts_return_latest_approved_version(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version1 = create_fact(db_session, organization, user)
+    approve_version(db_session, organization, fact, version1, user)
+
+    version2 = create_version(
+        db_session,
+        organization,
+        fact,
+        user,
+        "The approved product name is FreshTag Tracker.",
+    )
+    approve_version(db_session, organization, fact, version2, user)
+
+    repository = BrandFactRepository(db_session)
+    active = repository.list_active_fact_versions(
+        organization_id=organization.id
+    )
+
+    assert len(active) == 1
+    assert active[0].fact_id == fact.id
+    assert active[0].version_number == 2
+    assert active[0].fact_text == (
+        "The approved product name is FreshTag Tracker."
+    )
+
+    db_session.refresh(version1)
+    assert version1.status == "approved"
+    assert version1.fact_text == "The approved product name is FreshTag."
+
+
+def test_active_facts_exclude_future_effective_version(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version1 = create_fact(db_session, organization, user)
+    approve_version(db_session, organization, fact, version1, user)
+
+    version2 = create_version(
+        db_session,
+        organization,
+        fact,
+        user,
+        "The future approved product name is FreshTag Next.",
+        effective_from=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    approve_version(db_session, organization, fact, version2, user)
+
+    repository = BrandFactRepository(db_session)
+    active = repository.list_active_fact_versions(
+        organization_id=organization.id,
+        as_of=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+
+    assert len(active) == 1
+    assert active[0].version_number == 1
+    assert active[0].fact_text == "The approved product name is FreshTag."
+
+
+def test_active_facts_include_version_at_effective_time(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version1 = create_fact(db_session, organization, user)
+    approve_version(db_session, organization, fact, version1, user)
+
+    effective_from = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    version2 = create_version(
+        db_session,
+        organization,
+        fact,
+        user,
+        "The new approved product name is FreshTag Next.",
+        effective_from=effective_from,
+    )
+    approve_version(db_session, organization, fact, version2, user)
+
+    repository = BrandFactRepository(db_session)
+    active = repository.list_active_fact_versions(
+        organization_id=organization.id,
+        as_of=effective_from,
+    )
+
+    assert len(active) == 1
+    assert active[0].version_number == 2
+
+
+def test_active_facts_exclude_expired_version(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version = create_fact(db_session, organization, user)
+
+    version.effective_from = datetime(
+        2026, 1, 1, tzinfo=timezone.utc
+    )
+    version.expires_at = datetime(
+        2026, 3, 1, tzinfo=timezone.utc
+    )
+    db_session.flush()
+
+    approve_version(db_session, organization, fact, version, user)
+
+    repository = BrandFactRepository(db_session)
+    active = repository.list_active_fact_versions(
+        organization_id=organization.id,
+        as_of=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+
+    assert active == []
+
+
+def test_active_facts_exclude_archived_versions(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version = create_fact(db_session, organization, user)
+
+    version.status = "archived"
+    db_session.flush()
+
+    repository = BrandFactRepository(db_session)
+    active = repository.list_active_fact_versions(
+        organization_id=organization.id,
+        as_of=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+
+    assert active == []
+
+
+def test_active_facts_are_organization_scoped(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version = create_fact(db_session, organization, user)
+    approve_version(db_session, organization, fact, version, user)
+
+    other_organization, other_user = create_org_user(db_session)
+    other_fact, other_version = create_fact(
+        db_session, other_organization, other_user
+    )
+    approve_version(
+        db_session,
+        other_organization,
+        other_fact,
+        other_version,
+        other_user,
+    )
+
+    repository = BrandFactRepository(db_session)
+
+    own_active = repository.list_active_fact_versions(
+        organization_id=organization.id
+    )
+    other_active = repository.list_active_fact_versions(
+        organization_id=other_organization.id
+    )
+
+    assert len(own_active) == 1
+    assert own_active[0].fact_id == fact.id
+
+    assert len(other_active) == 1
+    assert other_active[0].fact_id == other_fact.id
+
+
+def test_active_facts_reject_naive_as_of_datetime(db_session):
+    organization, _ = create_org_user(db_session)
+    repository = BrandFactRepository(db_session)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        repository.list_active_fact_versions(
+            organization_id=organization.id,
+            as_of=datetime(2026, 4, 1),
+        )
+
+
+def test_active_facts_reject_invalid_limit(db_session):
+    organization, _ = create_org_user(db_session)
+    repository = BrandFactRepository(db_session)
+
+    with pytest.raises(ValueError, match="at least 1"):
+        repository.list_active_fact_versions(
+            organization_id=organization.id,
+            limit=0,
+        )
+
+
+def test_approved_fact_listing_is_organization_scoped(db_session):
+    organization, user = create_org_user(db_session)
+    fact, version = create_fact(db_session, organization, user)
+    approve_version(db_session, organization, fact, version, user)
+
+    other_organization, _ = create_org_user(db_session)
+
+    repository = BrandFactRepository(db_session)
+
+    own_approved = repository.list_approved_fact_versions(
+        organization_id=organization.id
+    )
+    other_approved = repository.list_approved_fact_versions(
+        organization_id=other_organization.id
+    )
+
+    assert len(own_approved) == 1
+    assert own_approved[0].fact_id == fact.id
+    assert other_approved == []

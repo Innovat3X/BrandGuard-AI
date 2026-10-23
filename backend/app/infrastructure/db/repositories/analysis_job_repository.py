@@ -8,6 +8,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.infrastructure.db.analysis_job import AnalysisJob
+from app.infrastructure.db.brand_fact_version import BrandFactVersion
+from app.infrastructure.db.brand_rule_version import BrandRuleVersion
 from app.infrastructure.db.finding import Finding
 from app.infrastructure.db.submission import Submission
 from app.infrastructure.db.submission_version import SubmissionVersion
@@ -271,6 +273,52 @@ class AnalysisJobRepository:
             .execution_options(populate_existing=True)
         )
 
+    def _validate_source_versions(
+        self,
+        organization_id: UUID,
+        findings: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Reject finding references that are absent, cross-tenant, or unapproved.
+
+        Null references are permitted when a finding does not rely on
+        a particular rule or fact. Only approved versions belonging to
+        the supplied organization may be referenced.
+        """
+        for index, finding in enumerate(findings):
+            rule_version_id = finding.get("source_rule_version_id")
+
+            if rule_version_id is not None:
+                approved_rule_version_id = self._session.scalar(
+                    select(BrandRuleVersion.id).where(
+                        BrandRuleVersion.organization_id == organization_id,
+                        BrandRuleVersion.id == rule_version_id,
+                        BrandRuleVersion.status == "approved",
+                    )
+                )
+
+                if approved_rule_version_id is None:
+                    raise ValueError(
+                        f"Finding at index {index} must reference an "
+                        "approved rule version in the same organization."
+                    )
+
+            fact_version_id = finding.get("source_fact_version_id")
+
+            if fact_version_id is not None:
+                approved_fact_version_id = self._session.scalar(
+                    select(BrandFactVersion.id).where(
+                        BrandFactVersion.organization_id == organization_id,
+                        BrandFactVersion.id == fact_version_id,
+                        BrandFactVersion.status == "approved",
+                    )
+                )
+
+                if approved_fact_version_id is None:
+                    raise ValueError(
+                        f"Finding at index {index} must reference an "
+                        "approved fact version in the same organization."
+                    )
+
     def persist_findings_and_finish_job(
         self,
         organization_id: UUID,
@@ -289,6 +337,9 @@ class AnalysisJobRepository:
         token is stale. In that case, no findings are written.
 
         Duplicate fingerprints within the same job are ignored.
+        Referenced rule/fact versions must be approved and belong to
+        the same organization as the job.
+
         Submission status is updated only if the analysed version is
         still the submission's current version.
 
@@ -371,6 +422,13 @@ class AnalysisJobRepository:
             raise LookupError(
                 "Submission version not found within the specified organization."
             )
+
+        # Validate source references only after checking the attempt token.
+        # A stale worker returns False and cannot write findings.
+        self._validate_source_versions(
+            organization_id=organization_id,
+            findings=prepared_findings,
+        )
 
         submission = None
 

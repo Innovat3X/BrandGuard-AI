@@ -1,7 +1,8 @@
+
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.infrastructure.db.brand_fact import BrandFact
@@ -103,9 +104,13 @@ class BrandFactRepository:
         statement = (
             select(BrandFact)
             .where(BrandFact.organization_id == organization_id)
-            .order_by(BrandFact.created_at.desc(), BrandFact.id)
+            .order_by(
+                BrandFact.created_at.desc(),
+                BrandFact.id,
+            )
             .limit(limit)
         )
+
         return list(self._session.scalars(statement).all())
 
     def list_fact_versions(
@@ -128,6 +133,7 @@ class BrandFactRepository:
             )
             .order_by(BrandFactVersion.version_number)
         )
+
         return list(self._session.scalars(statement).all())
 
     def list_approved_fact_versions(
@@ -135,10 +141,11 @@ class BrandFactRepository:
         organization_id: UUID,
         limit: int = 100,
     ) -> list[BrandFactVersion]:
-        """List approved fact versions for an organization.
+        """List approved fact versions, including their historical versions.
 
-        Expiry and effective-date policy should be applied by the
-        application service when determining authoritative evidence.
+        Use list_active_fact_versions() when retrieving facts for
+        current analysis. This method deliberately does not apply
+        effective-date or expiry filtering.
         """
         if limit < 1:
             raise ValueError("Limit must be at least 1.")
@@ -155,6 +162,78 @@ class BrandFactRepository:
             )
             .limit(limit)
         )
+
+        return list(self._session.scalars(statement).all())
+
+    def list_active_fact_versions(
+        self,
+        organization_id: UUID,
+        as_of: datetime | None = None,
+        limit: int = 100,
+    ) -> list[BrandFactVersion]:
+        """Return the latest applicable approved version of each fact.
+
+        Draft and archived versions are excluded. A version is applicable
+        when effective_from is absent or has passed, and expires_at is
+        absent or is still in the future.
+
+        When multiple eligible approved versions exist for a fact, the
+        highest eligible version number is returned. Historical versions
+        remain unchanged.
+
+        The application service remains responsible for any additional
+        evidence-quality or domain-specific claim verification rules.
+        """
+        if limit < 1:
+            raise ValueError("Limit must be at least 1.")
+
+        effective_at = as_of or datetime.now(timezone.utc)
+
+        if (
+            effective_at.tzinfo is None
+            or effective_at.utcoffset() is None
+        ):
+            raise ValueError("as_of must be timezone-aware.")
+
+        eligible_versions = (
+            select(
+                BrandFactVersion.id.label("version_id"),
+                func.row_number()
+                .over(
+                    partition_by=BrandFactVersion.fact_id,
+                    order_by=BrandFactVersion.version_number.desc(),
+                )
+                .label("version_rank"),
+            )
+            .where(
+                BrandFactVersion.organization_id == organization_id,
+                BrandFactVersion.status == "approved",
+                or_(
+                    BrandFactVersion.effective_from.is_(None),
+                    BrandFactVersion.effective_from <= effective_at,
+                ),
+                or_(
+                    BrandFactVersion.expires_at.is_(None),
+                    BrandFactVersion.expires_at > effective_at,
+                ),
+            )
+            .subquery()
+        )
+
+        statement = (
+            select(BrandFactVersion)
+            .join(
+                eligible_versions,
+                BrandFactVersion.id == eligible_versions.c.version_id,
+            )
+            .where(
+                BrandFactVersion.organization_id == organization_id,
+                eligible_versions.c.version_rank == 1,
+            )
+            .order_by(BrandFactVersion.fact_id)
+            .limit(limit)
+        )
+
         return list(self._session.scalars(statement).all())
 
     def create_fact_version(
@@ -244,7 +323,9 @@ class BrandFactRepository:
             return version
 
         if version.status != "draft":
-            raise ValueError("Only a draft fact version can be approved.")
+            raise ValueError(
+                "Only a draft fact version can be approved."
+            )
 
         version.status = "approved"
         version.approved_by = approved_by
@@ -263,10 +344,22 @@ class BrandFactRepository:
         effective_from: datetime | None,
         expires_at: datetime | None,
     ) -> None:
-        if effective_from is not None and effective_from.tzinfo is None:
+        if (
+            effective_from is not None
+            and (
+                effective_from.tzinfo is None
+                or effective_from.utcoffset() is None
+            )
+        ):
             raise ValueError("effective_from must be timezone-aware.")
 
-        if expires_at is not None and expires_at.tzinfo is None:
+        if (
+            expires_at is not None
+            and (
+                expires_at.tzinfo is None
+                or expires_at.utcoffset() is None
+            )
+        ):
             raise ValueError("expires_at must be timezone-aware.")
 
         if (
@@ -274,4 +367,6 @@ class BrandFactRepository:
             and expires_at is not None
             and expires_at <= effective_from
         ):
-            raise ValueError("expires_at must be later than effective_from.")
+            raise ValueError(
+                "expires_at must be later than effective_from."
+            )

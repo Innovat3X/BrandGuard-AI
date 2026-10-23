@@ -1,7 +1,8 @@
+
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.infrastructure.db.brand_rule import BrandRule
@@ -16,7 +17,7 @@ RULE_VERSION_STATUSES = {"draft", "approved", "archived"}
 class BrandRuleRepository:
     """Persistence operations for brand rules and immutable versions.
 
-    The application service owns transaction boundaries, commits,
+    Application services own transaction boundaries, commits,
     authorization, and workflow decisions.
     """
 
@@ -33,7 +34,7 @@ class BrandRuleRepository:
         severity: str,
         description: str | None = None,
     ) -> tuple[BrandRule, BrandRuleVersion]:
-        """Create a rule and its first draft version atomically."""
+        """Create a rule and its first draft version."""
         self._validate_version_fields(category, rule_text, severity)
 
         if not title.strip():
@@ -96,16 +97,20 @@ class BrandRuleRepository:
         organization_id: UUID,
         limit: int = 100,
     ) -> list[BrandRule]:
-        """List rules for one organization."""
+        """List parent rule records for one organization."""
         if limit < 1:
             raise ValueError("Limit must be at least 1.")
 
         statement = (
             select(BrandRule)
             .where(BrandRule.organization_id == organization_id)
-            .order_by(BrandRule.created_at.desc(), BrandRule.id)
+            .order_by(
+                BrandRule.created_at.desc(),
+                BrandRule.id,
+            )
             .limit(limit)
         )
+
         return list(self._session.scalars(statement).all())
 
     def list_rule_versions(
@@ -113,12 +118,11 @@ class BrandRuleRepository:
         organization_id: UUID,
         rule_id: UUID,
     ) -> list[BrandRuleVersion] | None:
-        """List a rule's versions in version-number order.
+        """List all versions in version-number order.
 
         Returns None if the rule does not belong to the organization.
         """
-        rule = self.get_rule(organization_id, rule_id)
-        if rule is None:
+        if self.get_rule(organization_id, rule_id) is None:
             return None
 
         statement = (
@@ -129,6 +133,73 @@ class BrandRuleRepository:
             )
             .order_by(BrandRuleVersion.version_number)
         )
+
+        return list(self._session.scalars(statement).all())
+
+    def list_active_rule_versions(
+        self,
+        organization_id: UUID,
+        as_of: datetime | None = None,
+        limit: int = 100,
+    ) -> list[BrandRuleVersion]:
+        """Return the latest applicable approved version of each rule.
+
+        Draft and archived versions are excluded. Versions with a future
+        effective_from timestamp are excluded until that time.
+
+        If older approved versions are retained when a newer version is
+        approved, the highest applicable version number is returned for
+        each logical rule. Historical version records are not modified.
+
+        The application service remains responsible for permissions
+        and any additional domain-specific applicability rules.
+        """
+        if limit < 1:
+            raise ValueError("Limit must be at least 1.")
+
+        effective_at = as_of or datetime.now(timezone.utc)
+
+        if (
+            effective_at.tzinfo is None
+            or effective_at.utcoffset() is None
+        ):
+            raise ValueError("as_of must be timezone-aware.")
+
+        ranked_versions = (
+            select(
+                BrandRuleVersion.id.label("version_id"),
+                func.row_number()
+                .over(
+                    partition_by=BrandRuleVersion.rule_id,
+                    order_by=BrandRuleVersion.version_number.desc(),
+                )
+                .label("version_rank"),
+            )
+            .where(
+                BrandRuleVersion.organization_id == organization_id,
+                BrandRuleVersion.status == "approved",
+                or_(
+                    BrandRuleVersion.effective_from.is_(None),
+                    BrandRuleVersion.effective_from <= effective_at,
+                ),
+            )
+            .subquery()
+        )
+
+        statement = (
+            select(BrandRuleVersion)
+            .join(
+                ranked_versions,
+                BrandRuleVersion.id == ranked_versions.c.version_id,
+            )
+            .where(
+                BrandRuleVersion.organization_id == organization_id,
+                ranked_versions.c.version_rank == 1,
+            )
+            .order_by(BrandRuleVersion.rule_id)
+            .limit(limit)
+        )
+
         return list(self._session.scalars(statement).all())
 
     def create_rule_version(
@@ -142,8 +213,17 @@ class BrandRuleRepository:
         description: str | None = None,
         effective_from: datetime | None = None,
     ) -> BrandRuleVersion:
-        """Append a new draft version without overwriting history."""
+        """Append a new draft version without overwriting existing history."""
         self._validate_version_fields(category, rule_text, severity)
+
+        if (
+            effective_from is not None
+            and (
+                effective_from.tzinfo is None
+                or effective_from.utcoffset() is None
+            )
+        ):
+            raise ValueError("effective_from must be timezone-aware.")
 
         rule = self._session.scalar(
             select(BrandRule)
@@ -166,7 +246,9 @@ class BrandRuleRepository:
             )
         )
 
-        next_version = 1 if latest_version is None else latest_version + 1
+        next_version = (
+            1 if latest_version is None else latest_version + 1
+        )
 
         version = BrandRuleVersion(
             organization_id=organization_id,
@@ -192,10 +274,10 @@ class BrandRuleRepository:
         version_number: int,
         approved_by: UUID,
     ) -> BrandRuleVersion:
-        """Approve a draft version without changing its rule content.
+        """Approve a draft version and record approval metadata.
 
-        Permission checks and the decision that approval is allowed
-        belong to the application service.
+        Authorization and approval workflow rules belong to the service.
+        Re-approving an approved version preserves its original metadata.
         """
         version = self._session.scalar(
             select(BrandRuleVersion)
@@ -216,7 +298,9 @@ class BrandRuleRepository:
             return version
 
         if version.status != "draft":
-            raise ValueError("Only a draft rule version can be approved.")
+            raise ValueError(
+                "Only a draft rule version can be approved."
+            )
 
         version.status = "approved"
         version.approved_by = approved_by

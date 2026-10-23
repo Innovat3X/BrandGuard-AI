@@ -1,8 +1,10 @@
+
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
-from app.infrastructure.db import BrandRule, BrandRuleVersion, Organization, User
+from app.infrastructure.db import Organization, User
 from app.infrastructure.db.repositories.brand_rule_repository import (
     BrandRuleRepository,
 )
@@ -16,13 +18,16 @@ def create_org_user(db_session):
         email=f"{suffix}@example.com",
         password_hash="test-password-hash",
     )
+
     db_session.add_all([organization, user])
     db_session.flush()
+
     return organization, user
 
 
 def create_rule(db_session, organization, user):
     repository = BrandRuleRepository(db_session)
+
     return repository.create_rule(
         organization_id=organization.id,
         title="Approved terminology",
@@ -31,6 +36,17 @@ def create_rule(db_session, organization, user):
         rule_text="Use the approved product name.",
         severity="medium",
         description="Terminology guidance",
+    )
+
+
+def approve_version(db_session, organization, rule, version, user):
+    repository = BrandRuleRepository(db_session)
+
+    return repository.approve_rule_version(
+        organization_id=organization.id,
+        rule_id=rule.id,
+        version_number=version.version_number,
+        approved_by=user.id,
     )
 
 
@@ -120,6 +136,7 @@ def test_new_version_preserves_existing_version(db_session):
     assert version1.status == "draft"
 
     versions = repository.list_rule_versions(organization.id, rule.id)
+
     assert versions is not None
     assert [item.version_number for item in versions] == [1, 2]
 
@@ -163,45 +180,33 @@ def test_approve_draft_version_records_approval_metadata(db_session):
     organization, user = create_org_user(db_session)
     rule, version = create_rule(db_session, organization, user)
 
-    repository = BrandRuleRepository(db_session)
-    approved = repository.approve_rule_version(
-        organization_id=organization.id,
-        rule_id=rule.id,
-        version_number=version.version_number,
-        approved_by=user.id,
+    approved = approve_version(
+        db_session, organization, rule, version, user
     )
 
     assert approved.status == "approved"
     assert approved.approved_by == user.id
     assert approved.approved_at is not None
     assert approved.approved_at.tzinfo is not None
-
-    # Approval must not modify the version's content.
     assert approved.rule_text == version.rule_text
 
 
 def test_reapproving_version_preserves_original_approval(db_session):
     organization, user = create_org_user(db_session)
     rule, version = create_rule(db_session, organization, user)
-    repository = BrandRuleRepository(db_session)
 
-    approved = repository.approve_rule_version(
-        organization_id=organization.id,
-        rule_id=rule.id,
-        version_number=version.version_number,
-        approved_by=user.id,
+    first = approve_version(
+        db_session, organization, rule, version, user
     )
-    original_approved_at = approved.approved_at
+    original_approved_at = first.approved_at
 
-    second_approval = repository.approve_rule_version(
-        organization_id=organization.id,
-        rule_id=rule.id,
-        version_number=version.version_number,
-        approved_by=user.id,
+    second = approve_version(
+        db_session, organization, rule, version, user
     )
 
-    assert second_approval.status == "approved"
-    assert second_approval.approved_at == original_approved_at
+    assert second.status == "approved"
+    assert second.approved_at == original_approved_at
+    assert second.approved_by == user.id
 
 
 def test_archived_version_cannot_be_approved(db_session):
@@ -244,4 +249,178 @@ def test_create_rule_rejects_invalid_version_fields(
             category=category,
             rule_text=rule_text,
             severity=severity,
+        )
+
+
+def test_active_rules_exclude_drafts(db_session):
+    organization, user = create_org_user(db_session)
+    create_rule(db_session, organization, user)
+
+    repository = BrandRuleRepository(db_session)
+
+    assert repository.list_active_rule_versions(
+        organization_id=organization.id,
+    ) == []
+
+
+def test_active_rules_return_only_approved_versions(db_session):
+    organization, user = create_org_user(db_session)
+    rule, version = create_rule(db_session, organization, user)
+
+    approve_version(db_session, organization, rule, version, user)
+
+    repository = BrandRuleRepository(db_session)
+    active = repository.list_active_rule_versions(
+        organization_id=organization.id,
+    )
+
+    assert len(active) == 1
+    assert active[0].rule_id == rule.id
+    assert active[0].version_number == 1
+    assert active[0].status == "approved"
+
+
+def test_active_rules_return_latest_approved_version(db_session):
+    organization, user = create_org_user(db_session)
+    rule, version1 = create_rule(db_session, organization, user)
+
+    approve_version(db_session, organization, rule, version1, user)
+
+    repository = BrandRuleRepository(db_session)
+    version2 = repository.create_rule_version(
+        organization_id=organization.id,
+        rule_id=rule.id,
+        category="terminology",
+        rule_text="Use the new approved product name.",
+        severity="high",
+        created_by=user.id,
+    )
+
+    approve_version(db_session, organization, rule, version2, user)
+
+    active = repository.list_active_rule_versions(
+        organization_id=organization.id,
+    )
+
+    assert len(active) == 1
+    assert active[0].rule_id == rule.id
+    assert active[0].version_number == 2
+    assert active[0].rule_text == "Use the new approved product name."
+
+    # The original approved version remains in history.
+    db_session.refresh(version1)
+    assert version1.status == "approved"
+    assert version1.rule_text == "Use the approved product name."
+
+
+def test_active_rules_exclude_future_effective_version(db_session):
+    organization, user = create_org_user(db_session)
+    rule, version1 = create_rule(db_session, organization, user)
+
+    approve_version(db_session, organization, rule, version1, user)
+
+    repository = BrandRuleRepository(db_session)
+
+    version2 = repository.create_rule_version(
+        organization_id=organization.id,
+        rule_id=rule.id,
+        category="terminology",
+        rule_text="Use the future product name.",
+        severity="high",
+        created_by=user.id,
+        effective_from=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+
+    approve_version(db_session, organization, rule, version2, user)
+
+    active = repository.list_active_rule_versions(
+        organization_id=organization.id,
+        as_of=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+
+    assert len(active) == 1
+    assert active[0].version_number == 1
+    assert active[0].rule_text == "Use the approved product name."
+
+
+def test_active_rules_include_version_when_effective(db_session):
+    organization, user = create_org_user(db_session)
+    rule, version1 = create_rule(db_session, organization, user)
+
+    approve_version(db_session, organization, rule, version1, user)
+
+    repository = BrandRuleRepository(db_session)
+    effective_from = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+    version2 = repository.create_rule_version(
+        organization_id=organization.id,
+        rule_id=rule.id,
+        category="terminology",
+        rule_text="Use the future product name.",
+        severity="high",
+        created_by=user.id,
+        effective_from=effective_from,
+    )
+
+    approve_version(db_session, organization, rule, version2, user)
+
+    active = repository.list_active_rule_versions(
+        organization_id=organization.id,
+        as_of=effective_from,
+    )
+
+    assert len(active) == 1
+    assert active[0].version_number == 2
+
+
+def test_active_rules_are_organization_scoped(db_session):
+    organization, user = create_org_user(db_session)
+    rule, version = create_rule(db_session, organization, user)
+
+    approve_version(db_session, organization, rule, version, user)
+
+    other_organization, other_user = create_org_user(db_session)
+    other_rule, other_version = create_rule(
+        db_session, other_organization, other_user
+    )
+
+    approve_version(
+        db_session, other_organization, other_rule, other_version, other_user
+    )
+
+    repository = BrandRuleRepository(db_session)
+
+    own_active = repository.list_active_rule_versions(
+        organization_id=organization.id,
+    )
+    other_active = repository.list_active_rule_versions(
+        organization_id=other_organization.id,
+    )
+
+    assert len(own_active) == 1
+    assert own_active[0].rule_id == rule.id
+
+    assert len(other_active) == 1
+    assert other_active[0].rule_id == other_rule.id
+
+
+def test_active_rules_reject_naive_as_of_datetime(db_session):
+    organization, _ = create_org_user(db_session)
+    repository = BrandRuleRepository(db_session)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        repository.list_active_rule_versions(
+            organization_id=organization.id,
+            as_of=datetime(2026, 4, 1),
+        )
+
+
+def test_active_rules_reject_invalid_limit(db_session):
+    organization, _ = create_org_user(db_session)
+    repository = BrandRuleRepository(db_session)
+
+    with pytest.raises(ValueError, match="at least 1"):
+        repository.list_active_rule_versions(
+            organization_id=organization.id,
+            limit=0,
         )
