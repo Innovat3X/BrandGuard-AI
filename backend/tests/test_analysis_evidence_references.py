@@ -198,6 +198,82 @@ def test_claim_from_different_text_is_marked_unavailable() -> None:
     )
 
     assert response.status == "partial"
+
+    assert any(
+        finding.category == FindingCategory.FACTUAL_CLAIM
+        and finding.result == FindingResult.CHECK_UNAVAILABLE
+        for finding in response.findings
+    )
+
+
+def test_valid_claim_is_checked_when_another_claim_has_mismatched_text() -> None:
+    content_text = "The current price is 10."
+    current_start = content_text.index("10")
+
+    current_claim = StructuredClaim(
+        fact_key="price",
+        claimed_value="10",
+        comparison_value="10",
+        source_text=content_text,
+        start_offset=current_start,
+        end_offset=current_start + 2,
+        severity=Severity.HIGH,
+    )
+
+    stale_text = "The previous price was 15."
+    stale_start = stale_text.index("15")
+
+    stale_claim = StructuredClaim(
+        fact_key="price",
+        claimed_value="15",
+        comparison_value="15",
+        source_text=stale_text,
+        start_offset=stale_start,
+        end_offset=stale_start + 2,
+        severity=Severity.HIGH,
+    )
+
+    fact_version_id = uuid4()
+    approved_fact = StructuredApprovedFact(
+        source_fact_version_id=fact_version_id,
+        fact_key="price",
+        approved_value="20",
+        comparison_value="20",
+        fact_text="The approved price is 20.",
+        source_url=None,
+        source_name="Approved pricing source",
+        status="approved",
+    )
+
+    rule = ApprovedTerminologyRule(
+        source_rule_version_id=uuid4(),
+        rule_type="forbidden_term",
+        term="OldBrand",
+        severity=Severity.MEDIUM,
+        status="approved",
+    )
+
+    response = run_analysis(
+        job_id=uuid4(),
+        submission_id=uuid4(),
+        submission_version_id=uuid4(),
+        content_text=content_text,
+        terminology_rules=[rule],
+        claims=[current_claim, stale_claim],
+        approved_facts=[approved_fact],
+        fact_lookup_completed=True,
+    )
+
+    assert response.status == "partial"
+
+    # The valid claim must still be checked against its approved fact.
+    assert any(
+        finding.result == FindingResult.CONFLICT
+        and finding.source_fact_version_id == fact_version_id
+        for finding in response.findings
+    )
+
+    # The mismatched claim must be explicitly unavailable.
     assert any(
         finding.category == FindingCategory.FACTUAL_CLAIM
         and finding.result == FindingResult.CHECK_UNAVAILABLE
