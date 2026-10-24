@@ -210,13 +210,38 @@ def run_analysis(
             )
         )
     elif claims:
-        findings.extend(
-            check_claims(
-                claims,
-                approved_facts,
-                fact_lookup_completed=fact_lookup_completed,
-            )
+        # Claim locations must refer to the exact content being analysed.
+        matching_claims = [
+            claim
+            for claim in claims
+            if claim.source_text == content_text
+        ]
+
+        has_mismatched_source = (
+            len(matching_claims) != len(claims)
         )
+
+        if has_mismatched_source:
+            findings.append(
+                _unavailable_finding(
+                    category=FindingCategory.FACTUAL_CLAIM,
+                    explanation=(
+                        "One or more extracted claims refer to text "
+                        "that does not match the submitted content. "
+                        "Those claims could not be reliably checked."
+                    ),
+                    source_name="Claim extraction",
+                )
+            )
+
+        if matching_claims:
+            findings.extend(
+                check_claims(
+                    matching_claims,
+                    approved_facts,
+                    fact_lookup_completed=fact_lookup_completed,
+                )
+            )
 
     # An inconclusive result is still an evaluated check.
     # An unavailable check means the overall analysis is partial.
