@@ -178,3 +178,46 @@ def test_register_validates_request_fields(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+def test_me_returns_authenticated_identity(
+    client: TestClient,
+) -> None:
+    registration = client.post(
+        "/api/v1/auth/register",
+        json=registration_payload(),
+    )
+
+    assert registration.status_code == 201
+    registered_data = registration.json()
+    token = registered_data["access_token"]
+
+    response = client.get(
+        "/api/v1/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["user"] == registered_data["user"]
+    assert data["organization"] == registered_data["organization"]
+    assert data["role"] == "admin"
+
+
+def test_me_requires_bearer_token(
+    client: TestClient,
+) -> None:
+    response = client.get("/api/v1/me")
+
+    assert response.status_code == 401
+
+
+def test_me_rejects_invalid_token(
+    client: TestClient,
+) -> None:
+    response = client.get(
+        "/api/v1/me",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+
+    assert response.status_code == 401
