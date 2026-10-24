@@ -11,8 +11,8 @@ type View =
   | "Submissions"
   | "Brand library"
   | "Review queue"
-  | "Insights";
-
+  | "Insights"
+  | "Submission details";
 type Status =
   | "In review"
   | "Approved"
@@ -20,7 +20,6 @@ type Status =
   | "Processing"
   | "Submitted"
   | "Draft";
-
 type Submission = {
   id: string;
   title: string;
@@ -117,11 +116,19 @@ function StatusPill({ status }: { status: Status }) {
   );
 }
 
-function SubmissionTable({ rows }: { rows: Submission[] }) {
+function SubmissionTable({
+  rows,
+  onSelect,
+}: {
+  rows: Submission[];
+  onSelect?: (submission: Submission) => void;
+}) {
   if (rows.length === 0) {
     return (
       <div className="px-6 py-12 text-center">
-        <p className="font-medium text-slate-700">No submissions found</p>
+        <p className="font-medium text-slate-700">
+          No submissions found
+        </p>
         <p className="mt-1 text-sm text-slate-500">
           Try changing your search or status filter.
         </p>
@@ -148,7 +155,19 @@ function SubmissionTable({ rows }: { rows: Submission[] }) {
               className="transition hover:bg-violet-50/30"
             >
               <td className="px-5 py-4">
-                <p className="font-medium text-slate-800">{item.title}</p>
+                {onSelect ? (
+                  <button
+                    type="button"
+                    onClick={() => onSelect(item)}
+                    className="text-left font-medium text-slate-800 hover:text-violet-700"
+                  >
+                    {item.title}
+                  </button>
+                ) : (
+                  <p className="font-medium text-slate-800">
+                    {item.title}
+                  </p>
+                )}
                 <p className="mt-1 text-xs text-slate-500">
                   {item.id} · {item.channel}
                 </p>
@@ -162,7 +181,9 @@ function SubmissionTable({ rows }: { rows: Submission[] }) {
               <td className="px-5 py-4">
                 <span
                   className={`font-medium ${
-                    item.issues > 0 ? "text-amber-700" : "text-slate-400"
+                    item.issues > 0
+                      ? "text-amber-700"
+                      : "text-slate-400"
                   }`}
                 >
                   {item.status === "Processing"
@@ -183,6 +204,8 @@ function SubmissionTable({ rows }: { rows: Submission[] }) {
 
 export default function Home() {
   const [activeView, setActiveView] = useState<View>("Overview");
+  const [selectedSubmission, setSelectedSubmission] =
+  useState<Submission | null>(null);
   const [submissions, setSubmissions] =
     useState<Submission[]>(initialSubmissions);
   const [search, setSearch] = useState("");
@@ -197,7 +220,10 @@ const [formError, setFormError] = useState("");
 
 const fileName = selectedFile?.name ?? "";
   const [notice, setNotice] = useState("");
-
+  function handleOpenSubmission(submission: Submission) {
+  setSelectedSubmission(submission);
+  setActiveView("Submission details");
+}
   const filteredSubmissions = useMemo(() => {
     return submissions.filter((item) => {
       const matchesSearch = [
@@ -340,6 +366,9 @@ const fileName = selectedFile?.name ?? "";
       subtitle:
         "A preview of governance trends and recurring issues.",
     },
+    "Submission details": {
+  subtitle: "Review submission information and analysis findings.",
+},
   };
 
   return (
@@ -594,7 +623,8 @@ const fileName = selectedFile?.name ?? "";
                         View all →
                       </button>
                     </div>
-                    <SubmissionTable rows={submissions.slice(0, 4)} />
+                    <SubmissionTable rows={submissions.slice(0, 4)}
+                    onSelect={handleOpenSubmission} />
                   </section>
 
                   <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-100/60">
@@ -708,7 +738,9 @@ const fileName = selectedFile?.name ?? "";
                     </select>
                   </div>
                 </div>
-                <SubmissionTable rows={filteredSubmissions} />
+                <SubmissionTable rows={filteredSubmissions}
+                onSelect={handleOpenSubmission}
+                 />
               </section>
             )}
 
@@ -722,7 +754,9 @@ const fileName = selectedFile?.name ?? "";
                     This sample queue demonstrates the proposed review interface; it does not perform real approval actions.
                   </p>
                 </div>
-                <SubmissionTable rows={filteredSubmissions} />
+                <SubmissionTable rows={filteredSubmissions}
+                 onSelect={handleOpenSubmission}
+                />
                 <div className="border-t border-slate-100 bg-slate-50 px-5 py-4 text-xs leading-5 text-slate-600">
                   In the integrated workflow, reviewer comments, request-changes actions and final decisions will be submitted to FastAPI. Only the backend can confirm approval.
                 </div>
@@ -854,6 +888,141 @@ const fileName = selectedFile?.name ?? "";
                 </section>
               </div>
             )}
+            {activeView === "Submission details" && (
+  <section className="space-y-5">
+    <button
+      type="button"
+      onClick={() => setActiveView("Submissions")}
+      className="text-sm font-semibold text-violet-700 hover:text-violet-900"
+    >
+      ← Back to submissions
+    </button>
+
+    {selectedSubmission ? (
+      <>
+        <div className="rounded-xl border border-slate-200 bg-white p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs text-slate-500">
+                {selectedSubmission.id}
+              </p>
+              <h2 className="mt-1 text-xl font-semibold text-slate-900">
+                {selectedSubmission.title}
+              </h2>
+              <p className="mt-2 text-sm text-slate-500">
+                {selectedSubmission.channel} · {selectedSubmission.owner}
+              </p>
+            </div>
+
+            <StatusPill status={selectedSubmission.status} />
+          </div>
+
+          <div className="mt-5 border-t border-slate-100 pt-4">
+            <p className="text-sm font-medium text-slate-700">
+              Findings summary
+            </p>
+            <p className="mt-1 text-sm text-slate-500">
+              {selectedSubmission.issues} issue(s) recorded in this sample.
+            </p>
+          </div>
+        </div>
+
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">
+            Analysis findings
+          </h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Illustrative examples showing how brand issues will be presented.
+            These are not actual AI analysis results.
+          </p>
+        </div>
+
+        {[
+          {
+            category: "Brand voice",
+            severity: "Medium",
+            affected: "Get amazing results instantly!",
+            explanation:
+              "This wording may sound overly promotional and may not match the approved brand tone.",
+            guideline: "Follow the approved tone of voice guidelines.",
+            suggestion:
+              "Explore how this product can support your everyday needs.",
+          },
+          {
+            category: "Terminology",
+            severity: "High",
+            affected: "Guaranteed results",
+            explanation:
+              "A guaranteed claim should not be used unless it is supported by approved brand information.",
+            guideline: "Use only approved terminology and verified claims.",
+            suggestion:
+              "Replace with a factual, approved product description.",
+          },
+          {
+            category: "Facts and claims",
+            severity: "High",
+            affected: "Unverified product performance claim",
+            explanation:
+              "The claim needs supporting evidence from an approved reference.",
+            guideline: "Verify factual claims against approved brand references.",
+            suggestion:
+              "Add a verified source or remove the unsupported claim.",
+          },
+        ].map((finding) => (
+          <article
+            key={finding.category}
+            className="rounded-xl border border-slate-200 bg-white p-5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-semibold text-slate-900">
+                {finding.category}
+              </h3>
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-medium ${
+                  finding.severity === "High"
+                    ? "bg-red-50 text-red-700"
+                    : "bg-amber-50 text-amber-700"
+                }`}
+              >
+                {finding.severity} severity
+              </span>
+            </div>
+
+            <div className="mt-4 space-y-3 text-sm">
+              <div>
+                <p className="font-medium text-slate-700">Affected content</p>
+                <p className="mt-1 text-slate-600">{finding.affected}</p>
+              </div>
+
+              <div>
+                <p className="font-medium text-slate-700">Explanation</p>
+                <p className="mt-1 text-slate-600">{finding.explanation}</p>
+              </div>
+
+              <div>
+                <p className="font-medium text-slate-700">Brand guideline</p>
+                <p className="mt-1 text-slate-600">{finding.guideline}</p>
+              </div>
+
+              <div className="rounded-lg bg-violet-50 p-3">
+                <p className="font-medium text-violet-900">
+                  Suggested correction
+                </p>
+                <p className="mt-1 text-violet-800">
+                  {finding.suggestion}
+                </p>
+              </div>
+            </div>
+          </article>
+        ))}
+      </>
+    ) : (
+      <p className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">
+        No submission selected. Return to submissions and choose an item.
+      </p>
+    )}
+  </section>
+)}
             <footer className="border-t border-slate-200 pt-4 text-xs leading-5 text-slate-400">
               BrandGuard AI · Frontend prototype · Demo records are illustrative and do not represent live backend data.
             </footer>
