@@ -3,16 +3,25 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-
+from app.api.v1.submissions import router as submissions_router
 from app.api.v1.auth import me_router, router as auth_router
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="BrandGuard AI API",
     version="1.0.0",
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(me_router, prefix="/api/v1")
+app.include_router(submissions_router, prefix="/api/v1")
 
 
 @app.exception_handler(HTTPException)

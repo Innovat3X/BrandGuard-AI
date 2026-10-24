@@ -4,6 +4,8 @@ const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"
 ).replace(/\/+$/, "");
 
+const ACCESS_TOKEN_KEY = "brandguard_access_token";
+
 export type AccessTokenProvider = () =>
   | string
   | null
@@ -11,12 +13,40 @@ export type AccessTokenProvider = () =>
 
 let accessTokenProvider: AccessTokenProvider | undefined;
 
-// Register the token provider when the authentication mechanism
-// has been finalised by the backend team.
+// Optional integration point for an app-level authentication store.
 export function configureAccessTokenProvider(
   provider?: AccessTokenProvider
 ): void {
   accessTokenProvider = provider;
+}
+
+// Store the token for this browser session.
+export function saveAccessToken(token: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
+}
+
+export function clearAccessToken(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+}
+
+function getStoredAccessToken(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return window.sessionStorage.getItem(ACCESS_TOKEN_KEY);
+  } catch {
+    return null;
+  }
 }
 
 interface ApiErrorBody {
@@ -54,9 +84,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function parseError(
-  response: Response
-): Promise<ApiError> {
+async function parseError(response: Response): Promise<ApiError> {
   let body: unknown;
 
   try {
@@ -91,14 +119,16 @@ export async function apiRequest<T>(
 
   headers.set("Accept", "application/json");
 
-  const token = await accessTokenProvider?.();
+  const token = accessTokenProvider
+    ? await accessTokenProvider()
+    : getStoredAccessToken();
 
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
   // FormData must set its own Content-Type boundary.
-  // JSON requests use application/json.
+  // JSON bodies use application/json.
   if (
     typeof options.body === "string" &&
     !headers.has("Content-Type")

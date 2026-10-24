@@ -12,6 +12,7 @@ from app.core.security import (
     create_access_token,
     decode_access_token,
     hash_password,
+    verify_password,
 )
 from app.core.settings import get_settings
 from app.infrastructure.db import Organization, User
@@ -23,14 +24,13 @@ from app.infrastructure.db.repositories.organization_repository import (
 )
 from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db
-from app.schemas.auth import RegisterRequest
+from app.schemas.auth import LoginRequest, RegisterRequest
 from app.schemas.auth_responses import (
     AuthResponse,
     MeResponse,
     OrganizationResponse,
     UserResponse,
 )
-
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 me_router = APIRouter(tags=["auth"])
@@ -66,7 +66,9 @@ class AuthenticatedActor:
 
 
 def get_current_actor(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        bearer_scheme
+    ),
     db: Session = Depends(get_db),
 ) -> AuthenticatedActor:
     if credentials is None or credentials.scheme.lower() != "bearer":
@@ -133,7 +135,9 @@ def get_current_actor(
             detail="You do not have access to this organization.",
         )
 
-    organization = OrganizationRepository(db).get_by_id(organization_id)
+    organization = OrganizationRepository(db).get_by_id(
+        organization_id
+    )
 
     if organization is None:
         raise HTTPException(
@@ -148,7 +152,11 @@ def get_current_actor(
     )
 
 
-@router.post("/register", response_model=AuthResponse, status_code=201)
+@router.post(
+    "/register",
+    response_model=AuthResponse,
+    status_code=201,
+)
 def register(
     request: RegisterRequest,
     db: Session = Depends(get_db),
@@ -202,7 +210,10 @@ def register(
     except IntegrityError:
         db.rollback()
 
-        if UserRepository(db).get_by_email(request.email) is not None:
+        if (
+            UserRepository(db).get_by_email(request.email)
+            is not None
+        ):
             db.rollback()
             raise HTTPException(
                 status_code=409,
@@ -218,6 +229,96 @@ def register(
     except Exception:
         db.rollback()
         raise
+
+    return AuthResponse(
+        access_token=token,
+        expires_in=int(lifetime.total_seconds()),
+        user=UserResponse(
+            id=user.id,
+            full_name=user.full_name,
+            email=user.email,
+        ),
+        organization=OrganizationResponse(
+            id=organization.id,
+            name=organization.name,
+        ),
+        role=membership.role,
+    )
+
+
+@router.post("/login", response_model=AuthResponse)
+def login(
+    request: LoginRequest,
+    db: Session = Depends(get_db),
+) -> AuthResponse:
+    """Authenticate a user with one organisation membership."""
+    settings = get_settings()
+    secret = get_jwt_secret()
+    lifetime = timedelta(
+        minutes=settings.jwt_access_token_expire_minutes
+    )
+
+    user = UserRepository(db).get_by_email(request.email)
+
+    # Use a generic response for unknown users and incorrect passwords.
+    if (
+        user is None
+        or not user.is_active
+        or not verify_password(
+            request.password,
+            user.password_hash,
+        )
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    memberships = OrganizationMembershipRepository(db).list_for_user(
+        user.id
+    )
+
+    if not memberships:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "No organisation access is configured for this account."
+            ),
+        )
+
+    # Do not arbitrarily select an organisation for a multi-organisation
+    # user. Full organisation selection must be implemented separately.
+    if len(memberships) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This account belongs to multiple organisations; "
+                "organisation selection is not yet available."
+            ),
+        )
+
+    membership = memberships[0]
+
+    organization = OrganizationRepository(db).get_by_id(
+        membership.organization_id
+    )
+
+    if organization is None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The organisation associated with this account "
+                "is unavailable."
+            ),
+        )
+
+    token = create_access_token(
+        subject=str(user.id),
+        secret_key=secret,
+        expires_delta=lifetime,
+        organization_id=str(organization.id),
+    )
 
     return AuthResponse(
         access_token=token,
