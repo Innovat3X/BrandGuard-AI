@@ -7,10 +7,13 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 
+import { registerUser } from "@/services/auth.service";
+import { ApiError } from "@/lib/api-client";
+
 const registrationSchema = z.object({
   full_name: z.string().trim().min(1, "Full name is required."),
   email: z.email("Enter a valid email address."),
-  password: z.string().min(1, "Password is required."),
+  password: z.string().min(1, "Password is required.").max(1024),
   organization_name: z
     .string()
     .trim()
@@ -21,10 +24,13 @@ type RegistrationValues = z.infer<typeof registrationSchema>;
 
 export default function RegisterPage() {
   const [notice, setNotice] = useState("");
+  const [apiError, setApiError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const {
     register,
     handleSubmit,
+    reset,
     formState: { errors },
   } = useForm<RegistrationValues>({
     resolver: zodResolver(registrationSchema),
@@ -36,10 +42,30 @@ export default function RegisterPage() {
     },
   });
 
-  function onSubmit() {
-    setNotice(
-      "Your details passed validation. Registration will be enabled after the backend endpoint is confirmed."
-    );
+  async function onSubmit(values: RegistrationValues) {
+    setNotice("");
+    setApiError("");
+    setIsSubmitting(true);
+
+    try {
+      const response = await registerUser(values);
+
+      setNotice(
+        `Account created successfully for ${response.organization.name}. The backend returned your registration details.`
+      );
+
+      reset();
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setApiError(error.message);
+      } else {
+        setApiError(
+          "Unable to complete registration. Please try again."
+        );
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -148,10 +174,19 @@ export default function RegisterPage() {
             )}
           </div>
 
+          {apiError && (
+            <p
+              role="alert"
+              className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+            >
+              {apiError}
+            </p>
+          )}
+
           {notice && (
             <p
               role="status"
-              className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+              className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800"
             >
               {notice}
             </p>
@@ -159,9 +194,10 @@ export default function RegisterPage() {
 
           <button
             type="submit"
-            className="w-full rounded-lg bg-violet-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:ring-offset-2"
+            disabled={isSubmitting}
+            className="w-full rounded-lg bg-violet-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:ring-offset-2"
           >
-            Create account
+            {isSubmitting ? "Creating account..." : "Create account"}
           </button>
         </form>
 
