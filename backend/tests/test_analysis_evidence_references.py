@@ -1,3 +1,4 @@
+
 from uuid import uuid4
 
 from app.analysis.claims import (
@@ -6,7 +7,6 @@ from app.analysis.claims import (
     check_claims,
 )
 from app.analysis.contracts import (
-    DetectionMethod,
     FindingCategory,
     FindingResult,
     Severity,
@@ -266,16 +266,24 @@ def test_valid_claim_is_checked_when_another_claim_has_mismatched_text() -> None
 
     assert response.status == "partial"
 
-    # The valid claim must still be checked against its approved fact.
-    assert any(
-        finding.result == FindingResult.CONFLICT
-        and finding.source_fact_version_id == fact_version_id
+    # The valid claim produces exactly one factual-claim conflict.
+    conflicts = [
+        finding
         for finding in response.findings
-    )
+        if finding.category == FindingCategory.FACTUAL_CLAIM
+        and finding.result == FindingResult.CONFLICT
+    ]
 
-    # The mismatched claim must be explicitly unavailable.
-    assert any(
-        finding.category == FindingCategory.FACTUAL_CLAIM
-        and finding.result == FindingResult.CHECK_UNAVAILABLE
+    assert len(conflicts) == 1
+    assert conflicts[0].evidence.submitted_text == "10"
+    assert conflicts[0].source_fact_version_id == fact_version_id
+
+    # The mismatched claim is unavailable, not a factual conflict.
+    unavailable = [
+        finding
         for finding in response.findings
-    )
+        if finding.category == FindingCategory.FACTUAL_CLAIM
+        and finding.result == FindingResult.CHECK_UNAVAILABLE
+    ]
+
+    assert len(unavailable) == 1
