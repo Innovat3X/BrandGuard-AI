@@ -35,6 +35,7 @@ def create_access_token(
     subject: str,
     secret_key: str,
     expires_delta: timedelta = DEFAULT_ACCESS_TOKEN_LIFETIME,
+    organization_id: str | None = None,
 ) -> str:
     """Create a signed JWT for a user."""
     if not subject.strip():
@@ -46,6 +47,9 @@ def create_access_token(
     if expires_delta <= timedelta(0):
         raise ValueError("Token lifetime must be positive.")
 
+    if organization_id is not None and not organization_id.strip():
+        raise ValueError("Organisation ID must not be empty.")
+
     now = datetime.now(timezone.utc)
 
     payload = {
@@ -53,6 +57,9 @@ def create_access_token(
         "iat": now,
         "exp": now + expires_delta,
     }
+
+    if organization_id is not None:
+        payload["organization_id"] = organization_id
 
     return jwt.encode(
         payload,
