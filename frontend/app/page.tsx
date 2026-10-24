@@ -1,6 +1,10 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
+import {
+  createSubmission,
+  queueSubmissionAnalysis,
+} from "@/services/submission.service";
 
 type View =
   | "Overview"
@@ -14,6 +18,7 @@ type Status =
   | "Approved"
   | "Changes requested"
   | "Processing"
+  | "Submitted"
   | "Draft";
 
 type Submission = {
@@ -87,6 +92,7 @@ const statusColors: Record<Status, string> = {
   Approved: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   "Changes requested": "bg-amber-50 text-amber-800 ring-amber-200",
   Processing: "bg-sky-50 text-sky-700 ring-sky-200",
+  Submitted: "bg-blue-50 text-blue-700 ring-blue-200",
   Draft: "bg-slate-100 text-slate-600 ring-slate-200",
 };
 
@@ -184,7 +190,12 @@ export default function Home() {
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
   const [draftText, setDraftText] = useState("");
-  const [fileName, setFileName] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+const [fileInputKey, setFileInputKey] = useState(0);
+const [isSubmitting, setIsSubmitting] = useState(false);
+const [formError, setFormError] = useState("");
+
+const fileName = selectedFile?.name ?? "";
   const [notice, setNotice] = useState("");
 
   const filteredSubmissions = useMemo(() => {
@@ -208,36 +219,105 @@ export default function Home() {
     });
   }, [submissions, search, statusFilter, activeView]);
 
-  function createDemoSubmission(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleSubmission(
+  event: FormEvent<HTMLFormElement>
+) {
+  event.preventDefault();
+  setFormError("");
+  setNotice("");
 
-    if (!draftText.trim() && !fileName) {
-      setNotice("Please enter some content or select a supported file.");
-      return;
-    }
+  if (!title.trim()) {
+    setFormError("Submission title is required.");
+    return;
+  }
+
+  const hasText = Boolean(draftText.trim());
+  const hasFile = selectedFile !== null;
+
+  if (hasText === hasFile) {
+    setFormError(
+      "Please provide either pasted text or one file, not both."
+    );
+    return;
+  }
+
+  setIsSubmitting(true);
+
+  try {
+    const created = await createSubmission(
+      selectedFile
+        ? {
+            title: title.trim(),
+            file: selectedFile,
+          }
+        : {
+            title: title.trim(),
+            text: draftText.trim(),
+          }
+    );
 
     const newSubmission: Submission = {
-      id: `DEMO-${Date.now().toString().slice(-5)}`,
+      id: created.submission_id,
       title: title.trim(),
-      channel: fileName ? "File upload" : "Text",
+      channel: hasFile ? "File upload" : "Text",
       owner: "You",
       updated: "Just now",
-      status: "Draft",
+      status: "Submitted",
       issues: 0,
     };
 
-    setSubmissions((current) => [newSubmission, ...current]);
+    setSubmissions((current) => [
+      newSubmission,
+      ...current,
+    ]);
+
     setSearch("");
     setStatusFilter("All");
     setActiveView("Submissions");
+
     setTitle("");
     setDraftText("");
-    setFileName("");
+    setSelectedFile(null);
+    setFileInputKey((key) => key + 1);
+
     setShowCreate(false);
-    setNotice(
-      "Demo only: the item was added locally. It has not been sent to FastAPI or analysed.",
+
+    try {
+      const queued = await queueSubmissionAnalysis(
+        created.submission_id,
+        created.version_number
+      );
+
+      setSubmissions((current) =>
+        current.map((item) =>
+          item.id === created.submission_id
+            ? { ...item, status: "Processing" }
+            : item
+        )
+      );
+
+      setNotice(
+        `Analysis queued successfully. Job ID: ${queued.job_id}`
+      );
+    } catch (error) {
+      setNotice(
+        `Submission created, but analysis could not be queued: ${
+          error instanceof Error
+            ? error.message
+            : "Unknown error"
+        }`
+      );
+    }
+  } catch (error) {
+    setFormError(
+      error instanceof Error
+        ? error.message
+        : "Unable to submit content. Please try again."
     );
+  } finally {
+    setIsSubmitting(false);
   }
+}
 
   const pageInfo: Record<View, { subtitle: string }> = {
     Overview: {
@@ -816,7 +896,7 @@ export default function Home() {
               </button>
             </div>
 
-            <form onSubmit={createDemoSubmission} className="space-y-5 p-6">
+            <form onSubmit={handleSubmission} className="space-y-5 p-6">
               <div>
                 <label
                   htmlFor="submission-title"
@@ -859,16 +939,18 @@ export default function Home() {
                   Or choose a file
                 </label>
                 <input
+                key={fileInputKey}
                   id="submission-file"
                   type="file"
                   accept=".txt,.pdf,.docx,.png,.jpg,.jpeg"
                   onChange={(event) =>
-                    setFileName(event.target.files?.[0]?.name ?? "")
+                    setSelectedFile(event.target.files?.[0] ?? null)
                   }
                   className="block w-full rounded-lg border border-slate-200 p-2 text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-violet-50 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-violet-700"
                 />
                 <p className="mt-1 text-xs leading-5 text-slate-500">
-                  Supported prototype formats: TXT, PDF, DOCX, PNG, JPG/JPEG. The selected file is not uploaded in demo mode.
+                  Supported formats: TXT, PDF, DOCX, PNG, JPG and JPEG.
+                  Select either pasted text or a file.
                 </p>
                 {fileName && (
                   <p className="mt-2 text-xs font-medium text-violet-700">
@@ -878,9 +960,16 @@ export default function Home() {
               </div>
 
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
-                Demo mode: this form adds a draft to the current browser session only. It does not send content to FastAPI or run an analysis.
+                This form is prepared for FastAPI submission. Live submissions require an authenticated session and registered backend endpoints.
               </div>
-
+              {formError && (
+  <p
+    role="alert"
+    className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+  >
+    {formError}
+  </p>
+)}
               <div className="flex flex-wrap justify-end gap-3 border-t border-slate-100 pt-4">
                 <button
                   type="button"
@@ -891,9 +980,10 @@ export default function Home() {
                 </button>
                 <button
                   type="submit"
-                  className="rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:ring-offset-2"
+                  disabled={isSubmitting}
+                  className="rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:ring-offset-2"
                 >
-                  Add demo submission
+                  {isSubmitting ? "Submitting..." : "Submit for analysis"}
                 </button>
               </div>
             </form>
