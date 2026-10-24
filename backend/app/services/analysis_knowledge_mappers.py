@@ -1,12 +1,14 @@
 """Conservative mapping of database knowledge into analysis inputs.
 
-Interim terminology syntax:
+Supported interim terminology syntax:
     forbidden_term: <term>
     forbidden_term: <term> -> <replacement>
     required_term: <term>
+    required_term_case_sensitive: <term>
     preferred_term: <term> -> <replacement>
 
-This syntax is an implementation convention, not yet a canonical
+The optional '_case_sensitive' suffix can be used with any supported
+rule type. This is an implementation convention, not a canonical
 shared-contract change. Arbitrary prose is deliberately not parsed.
 
 The database currently stores facts as free text. Those records cannot
@@ -43,10 +45,12 @@ class MappedTerminologyRule:
     status: Literal["approved"]
     replacement: str | None
     source_name: str
+    case_sensitive: bool = False
 
 
 _RULE_PATTERN = re.compile(
-    r"^(forbidden_term|required_term|preferred_term)\s*:\s*(.+)$"
+    r"^(forbidden_term|required_term|preferred_term)"
+    r"(?:_case_sensitive)?\s*:\s*(.+)$"
 )
 
 
@@ -101,13 +105,11 @@ def map_approved_terminology_rules(
 ) -> tuple[MappedTerminologyRule, ...] | None:
     """Map terminology rules or mark the whole check unavailable.
 
-    Non-terminology rule categories are not handled by the current
-    terminology checker and are skipped.
+    Non-terminology rule categories are skipped.
 
-    If any terminology rule uses unrecognised prose, the mapper returns
-    None instead of silently dropping that rule and analysing an
-    incomplete rule set. An empty tuple means no terminology-category
-    records were supplied.
+    If any terminology rule uses unrecognised prose, return None
+    instead of silently dropping it and analysing an incomplete set.
+    An empty tuple means no terminology-category records were supplied.
     """
 
     mapped: list[MappedTerminologyRule] = []
@@ -123,6 +125,9 @@ def map_approved_terminology_rules(
 
         rule_type, term, replacement = parsed
 
+        rule_prefix = record.rule_text.strip().split(":", maxsplit=1)[0]
+        case_sensitive = rule_prefix.endswith("_case_sensitive")
+
         mapped.append(
             MappedTerminologyRule(
                 source_rule_version_id=record.version_id,
@@ -135,6 +140,7 @@ def map_approved_terminology_rules(
                     f"Approved terminology rule version "
                     f"{record.version_number}"
                 ),
+                case_sensitive=case_sensitive,
             )
         )
 
@@ -149,8 +155,7 @@ def map_approved_facts(
     The current database fact model does not provide fact_key,
     approved_value, or comparison_value. Returning None for a non-empty
     set prevents free-text facts from being treated as structured
-    evidence. The pipeline must then report claim verification as
-    unavailable rather than passing the check.
+    evidence. The pipeline must report claim verification as unavailable.
     """
 
     if not records:

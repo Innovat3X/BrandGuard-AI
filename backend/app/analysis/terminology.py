@@ -1,4 +1,3 @@
-
 import re
 from collections.abc import Sequence
 from typing import Literal
@@ -32,6 +31,9 @@ class ApprovedTerminologyRule(BaseModel):
     replacement: str | None = None
     source_name: str = "Approved terminology rule"
 
+    # Defaults to False to preserve existing checker behavior.
+    case_sensitive: bool = False
+
     @model_validator(mode="after")
     def validate_rule(self):
         if not self.term.strip():
@@ -45,7 +47,10 @@ class ApprovedTerminologyRule(BaseModel):
                 "A preferred-term rule requires a replacement."
             )
 
-        if self.replacement is not None and not self.replacement.strip():
+        if (
+            self.replacement is not None
+            and not self.replacement.strip()
+        ):
             raise ValueError("A replacement cannot be blank.")
 
         return self
@@ -62,6 +67,7 @@ def find_term_occurrences(
         return []
 
     flags = 0 if case_sensitive else re.IGNORECASE
+
     pattern = re.compile(
         rf"(?<!\w){re.escape(term.strip())}(?!\w)",
         flags,
@@ -82,6 +88,9 @@ def check_terminology(
 
     This function does not interpret arbitrary natural-language
     rule_text. Callers must supply structured rule information.
+
+    Case-sensitive matching is opt-in so existing rules retain
+    their previous behavior unless explicitly configured otherwise.
     """
 
     findings: list[Finding] = []
@@ -90,21 +99,30 @@ def check_terminology(
         matches = find_term_occurrences(
             text,
             rule.term,
+            case_sensitive=rule.case_sensitive,
         )
 
         if rule.rule_type == "required_term":
             if matches:
                 continue
 
+            explanation = (
+                f"The required term '{rule.term}' was not "
+                "found in the submitted content."
+            )
+
+            if rule.case_sensitive:
+                explanation += (
+                    " Matching is case-sensitive; the exact "
+                    "approved spelling is required."
+                )
+
             findings.append(
                 Finding(
                     category=FindingCategory.TERMINOLOGY,
                     severity=rule.severity,
                     result=FindingResult.CONFLICT,
-                    explanation=(
-                        f"The required term '{rule.term}' was not "
-                        "found in the submitted content."
-                    ),
+                    explanation=explanation,
                     evidence=Evidence(
                         approved_reference=rule.term,
                         source_name=rule.source_name,
