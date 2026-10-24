@@ -46,9 +46,7 @@ DEMO_RULE_VERSION_ID = UUID(
 )
 
 DEMO_FACT_ID = UUID("40000000-0000-4000-8000-000000000001")
-DEMO_FACT_VERSION_ID = UUID(
-    "40000000-0000-4000-8000-000000000002"
-)
+DEMO_FACT_VERSION_ID = UUID("40000000-0000-4000-8000-000000000002")
 
 DEMO_SUBMISSION_ID = UUID(
     "50000000-0000-4000-8000-000000000001"
@@ -57,18 +55,17 @@ DEMO_SUBMISSION_VERSION_ID = UUID(
     "50000000-0000-4000-8000-000000000002"
 )
 
-DEMO_RULE_TEXT = (
-    "Use the product name FreshTrail exactly. "
-    "Do not insert a space or abbreviate the name."
-)
+# Explicit syntax supported by analysis_knowledge_mappers.py.
+DEMO_RULE_TEXT = "preferred_term: Fresh Trail -> FreshTrail"
 
 DEMO_FACT_TEXT = (
     "FreshTrail is a synthetic demonstration product used "
     "only to demonstrate the BrandGuard AI workflow."
 )
 
+# The alternate spelling intentionally violates the demo rule.
 DEMO_SUBMISSION_TEXT = (
-    "Meet FreshTrail, a synthetic demonstration product. "
+    "Meet Fresh Trail, a synthetic demonstration product. "
     "This sample submission is provided only to demonstrate "
     "the BrandGuard AI database workflow."
 )
