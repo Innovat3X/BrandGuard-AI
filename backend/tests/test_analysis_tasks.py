@@ -70,7 +70,7 @@ def test_task_invokes_worker_and_returns_job_status(monkeypatch):
 
     assert args[0] is session
     assert isinstance(args[1], CeleryAnalysisJobQueue)
-    assert kwargs == {}
+    assert kwargs == {"heartbeat_session_factory": session_factory}
 
     worker.process_job.assert_called_once_with(job_id)
 

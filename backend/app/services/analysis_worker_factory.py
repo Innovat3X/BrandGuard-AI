@@ -11,6 +11,7 @@ from app.services.analysis_pipeline_factory import (
 from app.services.analysis_worker_service import (
     AnalysisJobQueue,
     AnalysisWorkerService,
+    HeartbeatSessionFactory,
 )
 from app.services.database_analysis_pipeline import ClaimExtractor
 
@@ -21,6 +22,8 @@ def build_analysis_worker_service(
     *,
     claim_extractor: ClaimExtractor | None = None,
     max_attempts: int = 3,
+    heartbeat_session_factory: HeartbeatSessionFactory | None = None,
+    heartbeat_interval_seconds: float = 60.0,
 ) -> AnalysisWorkerService:
     """Build a worker with database loading and analysis dependencies.
 
@@ -44,4 +47,6 @@ def build_analysis_worker_service(
         pipeline,
         queue,
         max_attempts=max_attempts,
+        heartbeat_session_factory=heartbeat_session_factory,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
     )

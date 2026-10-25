@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import time
 from uuid import uuid4
 
 import pytest
@@ -307,3 +308,74 @@ def test_retry_limit_must_be_positive(monkeypatch):
             queue=queue,
             max_attempts=0,
         )
+
+def test_worker_heartbeats_during_a_long_running_analysis(monkeypatch):
+    ctx = build_worker(monkeypatch)
+    heartbeat_session = MagicMock()
+    heartbeat_context = MagicMock()
+    heartbeat_context.__enter__.return_value = heartbeat_session
+    heartbeat_session_factory = MagicMock(return_value=heartbeat_context)
+    ctx["jobs"].heartbeat_processing_job.return_value = True
+
+    ctx["pipeline"].analyze.side_effect = lambda *_args: (
+        time.sleep(0.05),
+        SimpleNamespace(
+            job_id=ctx["job_id"],
+            submission_id=ctx["submission_id"],
+            submission_version_id=ctx["version_id"],
+            status="completed",
+            findings=[],
+        ),
+    )[1]
+
+    ctx["worker"] = AnalysisWorkerService(
+        session=ctx["session"],
+        version_loader=ctx["loader"],
+        pipeline=ctx["pipeline"],
+        queue=ctx["queue"],
+        max_attempts=3,
+        heartbeat_session_factory=heartbeat_session_factory,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    result = ctx["worker"].process_job(ctx["job_id"])
+
+    assert result.status == "completed"
+    assert ctx["jobs"].heartbeat_processing_job.call_count >= 1
+    assert heartbeat_session.commit.call_count >= 1
+
+
+def test_worker_does_not_persist_findings_after_heartbeat_loses_ownership(monkeypatch):
+    ctx = build_worker(monkeypatch)
+    heartbeat_session = MagicMock()
+    heartbeat_context = MagicMock()
+    heartbeat_context.__enter__.return_value = heartbeat_session
+    heartbeat_session_factory = MagicMock(return_value=heartbeat_context)
+    ctx["jobs"].heartbeat_processing_job.return_value = False
+
+    ctx["pipeline"].analyze.side_effect = lambda *_args: (
+        time.sleep(0.04),
+        SimpleNamespace(
+            job_id=ctx["job_id"],
+            submission_id=ctx["submission_id"],
+            submission_version_id=ctx["version_id"],
+            status="completed",
+            findings=[],
+        ),
+    )[1]
+
+    ctx["worker"] = AnalysisWorkerService(
+        session=ctx["session"],
+        version_loader=ctx["loader"],
+        pipeline=ctx["pipeline"],
+        queue=ctx["queue"],
+        max_attempts=3,
+        heartbeat_session_factory=heartbeat_session_factory,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    result = ctx["worker"].process_job(ctx["job_id"])
+
+    assert result.status == "stale"
+    ctx["jobs"].persist_findings_and_finish_job.assert_not_called()
+    ctx["session"].rollback.assert_called_once()
