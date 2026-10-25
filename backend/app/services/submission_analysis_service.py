@@ -19,10 +19,13 @@ from app.infrastructure.db.repositories.analysis_job_repository import (
 from app.infrastructure.db.repositories.submission_repository import (
     SubmissionRepository,
 )
+from app.services.analysis_dispatch import (
+    enqueue_with_dispatch_lease,
+)
 
 
 class AnalysisJobQueue(Protocol):
-    """Interface for a future Celery/RabbitMQ queue adapter."""
+    """Interface for the analysis queue adapter."""
 
     def enqueue_analysis(self, job_id: UUID) -> None:
         """Publish a message containing the persisted analysis-job ID."""
@@ -61,8 +64,8 @@ class SubmissionAnalysisService:
     Repositories do not commit transactions themselves. This service
     owns transaction boundaries.
 
-    Queue publication happens only after the database transaction
-    commits, so workers cannot receive an uncommitted job.
+    The submission and job are committed before queue dispatch. Dispatch
+    obtains a persisted lease before publishing to the broker.
     """
 
     def __init__(
@@ -88,14 +91,10 @@ class SubmissionAnalysisService:
         cleaned_title = title.strip()
 
         if not cleaned_title:
-            raise ValueError(
-                "Submission title must not be empty."
-            )
+            raise ValueError("Submission title must not be empty.")
 
         if not text.strip():
-            raise ValueError(
-                "Submission text must not be empty."
-            )
+            raise ValueError("Submission text must not be empty.")
 
         content_hash = hashlib.sha256(
             text.encode("utf-8")
@@ -144,12 +143,10 @@ class SubmissionAnalysisService:
         ) = None,
         version_number: int | None = None,
     ) -> RequestedAnalysisJob:
-        """Create or retrieve an idempotent job and enqueue its ID."""
+        """Create or retrieve an idempotent job and dispatch it safely."""
 
         if not idempotency_key.strip():
-            raise ValueError(
-                "Idempotency key must not be empty."
-            )
+            raise ValueError("Idempotency key must not be empty.")
 
         try:
             submission = self._submissions.get_submission(
@@ -191,25 +188,30 @@ class SubmissionAnalysisService:
                 requested_checks=requested_checks,
             )
 
+            # The job is durable before attempting external dispatch.
             self._session.commit()
 
         except Exception:
             self._session.rollback()
             raise
 
-        # The transaction has committed. Repeated dispatch is possible,
-        # so the eventual worker must claim the job atomically using
-        # AnalysisJobRepository.claim_queued_job().
         if job.status == "queued":
             try:
-                self._queue.enqueue_analysis(job.id)
+                enqueue_with_dispatch_lease(
+                    session=self._session,
+                    jobs=self._analysis_jobs,
+                    queue=self._queue,
+                    job_id=job.id,
+                )
 
             except Exception as exc:
                 raise AnalysisQueueDispatchError(
                     job_id=job.id,
                     message=(
                         "The analysis job was saved, but queue dispatch "
-                        "failed. Retry using the same idempotency key."
+                        "failed. Retry using the same idempotency key. "
+                        "The recovery task can retry dispatch while the "
+                        "job remains queued."
                     ),
                 ) from exc
 

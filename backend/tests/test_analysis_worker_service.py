@@ -20,6 +20,9 @@ def build_worker(monkeypatch, attempts=1, status="completed"):
     loader = MagicMock()
     pipeline = MagicMock()
 
+    jobs.acquire_dispatch_lease.return_value = True
+    jobs.release_dispatch_lease.return_value = True
+
     organization_id = uuid4()
     job_id = uuid4()
     submission_id = uuid4()
@@ -122,9 +125,12 @@ def test_successful_analysis_persists_and_finalises_job(
         submission_status="under_review",
     )
 
-    # One commit for claiming the job, one for final persistence.
     assert ctx["session"].commit.call_count == 2
     ctx["session"].rollback.assert_not_called()
+
+    # Successful analysis is not dispatched again.
+    ctx["jobs"].acquire_dispatch_lease.assert_not_called()
+    ctx["queue"].enqueue_analysis.assert_not_called()
 
 
 def test_duplicate_delivery_does_not_run_pipeline(monkeypatch):
@@ -137,6 +143,8 @@ def test_duplicate_delivery_does_not_run_pipeline(monkeypatch):
     ctx["pipeline"].analyze.assert_not_called()
     ctx["loader"].load_submission_version.assert_not_called()
     ctx["jobs"].persist_findings_and_finish_job.assert_not_called()
+    ctx["jobs"].acquire_dispatch_lease.assert_not_called()
+    ctx["queue"].enqueue_analysis.assert_not_called()
     ctx["session"].rollback.assert_called_once()
 
 
@@ -186,12 +194,19 @@ def test_cross_organisation_version_is_not_analysed(monkeypatch):
         claimed_attempt=1,
     )
 
+    ctx["jobs"].acquire_dispatch_lease.assert_called_once()
+    lease_args = ctx["jobs"].acquire_dispatch_lease.call_args.kwargs
+    assert lease_args["job_id"] == ctx["job_id"]
+    assert lease_args["lease_token"] is not None
+    assert lease_args["lease_expires_at"].tzinfo is not None
+
     ctx["queue"].enqueue_analysis.assert_called_once_with(
         ctx["job_id"]
     )
+    ctx["jobs"].release_dispatch_lease.assert_not_called()
 
 
-def test_pipeline_failure_requeues_job(monkeypatch):
+def test_pipeline_failure_requeues_job_with_dispatch_lease(monkeypatch):
     ctx = build_worker(monkeypatch)
 
     ctx["pipeline"].analyze.side_effect = RuntimeError(
@@ -206,9 +221,36 @@ def test_pipeline_failure_requeues_job(monkeypatch):
 
     ctx["session"].rollback.assert_called_once()
     ctx["jobs"].update_job_status.assert_called_once()
+
+    ctx["jobs"].acquire_dispatch_lease.assert_called_once()
+    lease_args = ctx["jobs"].acquire_dispatch_lease.call_args.kwargs
+    assert lease_args["job_id"] == ctx["job_id"]
+    assert lease_args["lease_token"] is not None
+
     ctx["queue"].enqueue_analysis.assert_called_once_with(
         ctx["job_id"]
     )
+    ctx["jobs"].release_dispatch_lease.assert_not_called()
+
+
+def test_retry_does_not_publish_if_another_dispatcher_owns_lease(
+    monkeypatch,
+):
+    ctx = build_worker(monkeypatch)
+
+    ctx["pipeline"].analyze.side_effect = RuntimeError(
+        "Simulated analysis failure"
+    )
+    ctx["jobs"].acquire_dispatch_lease.return_value = False
+
+    result = ctx["worker"].process_job(ctx["job_id"])
+
+    assert result.status == "queued"
+    assert result.retry_scheduled is True
+
+    ctx["jobs"].acquire_dispatch_lease.assert_called_once()
+    ctx["queue"].enqueue_analysis.assert_not_called()
+    ctx["jobs"].release_dispatch_lease.assert_not_called()
 
 
 def test_exhausted_attempts_mark_job_failed(monkeypatch):
@@ -242,10 +284,13 @@ def test_exhausted_attempts_mark_job_failed(monkeypatch):
     )
 
     ctx["session"].commit.assert_called()
+    ctx["jobs"].acquire_dispatch_lease.assert_not_called()
     ctx["queue"].enqueue_analysis.assert_not_called()
 
 
-def test_retry_queue_failure_reports_job_id(monkeypatch):
+def test_retry_queue_failure_reports_job_id_and_releases_lease(
+    monkeypatch,
+):
     ctx = build_worker(monkeypatch)
 
     ctx["pipeline"].analyze.side_effect = RuntimeError(
@@ -260,9 +305,44 @@ def test_retry_queue_failure_reports_job_id(monkeypatch):
 
     assert exc_info.value.job_id == ctx["job_id"]
 
-    # The job was committed back to queued before dispatch.
+    # The job is committed as queued before the lease-protected dispatch.
     ctx["jobs"].update_job_status.assert_called_once()
-    ctx["session"].commit.assert_called()
+    ctx["jobs"].acquire_dispatch_lease.assert_called_once()
+    ctx["jobs"].release_dispatch_lease.assert_called_once()
+
+    acquired = ctx["jobs"].acquire_dispatch_lease.call_args.kwargs
+    released = ctx["jobs"].release_dispatch_lease.call_args.kwargs
+
+    assert released["job_id"] == ctx["job_id"]
+    assert released["lease_token"] == acquired["lease_token"]
+
+    # Original claim, queued state, lease acquisition and lease release.
+    assert ctx["session"].commit.call_count == 4
+
+
+def test_retry_publish_does_not_release_superseded_lease(monkeypatch):
+    ctx = build_worker(monkeypatch)
+
+    ctx["pipeline"].analyze.side_effect = RuntimeError(
+        "Simulated analysis failure"
+    )
+    ctx["queue"].enqueue_analysis.side_effect = RuntimeError(
+        "Simulated queue outage"
+    )
+    ctx["jobs"].release_dispatch_lease.return_value = False
+
+    with pytest.raises(AnalysisQueueDispatchError):
+        ctx["worker"].process_job(ctx["job_id"])
+
+    acquired = ctx["jobs"].acquire_dispatch_lease.call_args.kwargs
+    released = ctx["jobs"].release_dispatch_lease.call_args.kwargs
+
+    assert released["job_id"] == ctx["job_id"]
+    assert released["lease_token"] == acquired["lease_token"]
+
+    # A superseded lease is not committed as released.
+    assert ctx["session"].commit.call_count == 3
+    assert ctx["session"].rollback.call_count == 3
 
 
 def test_mismatched_pipeline_job_is_not_persisted(monkeypatch):
@@ -283,6 +363,10 @@ def test_mismatched_pipeline_job_is_not_persisted(monkeypatch):
 
     ctx["jobs"].persist_findings_and_finish_job.assert_not_called()
     ctx["jobs"].update_job_status.assert_called_once()
+    ctx["jobs"].acquire_dispatch_lease.assert_called_once()
+    ctx["queue"].enqueue_analysis.assert_called_once_with(
+        ctx["job_id"]
+    )
 
 
 def test_retry_limit_must_be_positive(monkeypatch):
@@ -309,12 +393,15 @@ def test_retry_limit_must_be_positive(monkeypatch):
             max_attempts=0,
         )
 
+
 def test_worker_heartbeats_during_a_long_running_analysis(monkeypatch):
     ctx = build_worker(monkeypatch)
     heartbeat_session = MagicMock()
     heartbeat_context = MagicMock()
     heartbeat_context.__enter__.return_value = heartbeat_session
-    heartbeat_session_factory = MagicMock(return_value=heartbeat_context)
+    heartbeat_session_factory = MagicMock(
+        return_value=heartbeat_context
+    )
     ctx["jobs"].heartbeat_processing_job.return_value = True
 
     ctx["pipeline"].analyze.side_effect = lambda *_args: (
@@ -345,12 +432,16 @@ def test_worker_heartbeats_during_a_long_running_analysis(monkeypatch):
     assert heartbeat_session.commit.call_count >= 1
 
 
-def test_worker_does_not_persist_findings_after_heartbeat_loses_ownership(monkeypatch):
+def test_worker_does_not_persist_findings_after_heartbeat_loses_ownership(
+    monkeypatch,
+):
     ctx = build_worker(monkeypatch)
     heartbeat_session = MagicMock()
     heartbeat_context = MagicMock()
     heartbeat_context.__enter__.return_value = heartbeat_session
-    heartbeat_session_factory = MagicMock(return_value=heartbeat_context)
+    heartbeat_session_factory = MagicMock(
+        return_value=heartbeat_context
+    )
     ctx["jobs"].heartbeat_processing_job.return_value = False
 
     ctx["pipeline"].analyze.side_effect = lambda *_args: (

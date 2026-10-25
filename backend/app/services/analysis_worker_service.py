@@ -2,8 +2,6 @@
 
 This module coordinates persistence and the analysis pipeline without
 depending on a specific AI provider or analysis implementation.
-
-The queue adapter and pipeline adapter will be connected separately.
 """
 
 from __future__ import annotations
@@ -21,6 +19,9 @@ from sqlalchemy.orm import Session
 from app.infrastructure.db.repositories.analysis_job_repository import (
     AnalysisJobRepository,
 )
+from app.services.analysis_dispatch import (
+    enqueue_with_dispatch_lease,
+)
 from app.services.analysis_persistence_mapper import (
     map_findings_for_persistence,
 )
@@ -33,10 +34,9 @@ HeartbeatSessionFactory = Callable[[], AbstractContextManager[Session]]
 class _WorkerHeartbeat:
     """Refresh a claimed job with an independent database session.
 
-    The repository fences each refresh by both ``processing`` status and the
-    claimed attempt number. A false result means that this worker no longer
-    owns the current attempt. Database errors are logged and retried on the
-    next interval; the persisted heartbeat timeout remains the recovery guard.
+    The repository fences each refresh by processing status and the claimed
+    attempt number. A false result means this worker no longer owns the
+    current attempt.
     """
 
     def __init__(
@@ -69,9 +69,8 @@ class _WorkerHeartbeat:
     def stop(self) -> None:
         self._stop_event.set()
         # Do not let a slow database call block task completion indefinitely.
-        # If the thread outlives this wait, the repository's status/attempt
-        # conditions still prevent it from refreshing a superseded job.
         self._thread.join(timeout=10.0)
+
         if self._thread.is_alive():
             logger.warning(
                 "Heartbeat thread is still stopping for analysis job %s",
@@ -87,6 +86,7 @@ class _WorkerHeartbeat:
                         job_id=self._job_id,
                         claimed_attempt=self._claimed_attempt,
                     )
+
                     if refreshed:
                         heartbeat_session.commit()
                         continue
@@ -95,10 +95,9 @@ class _WorkerHeartbeat:
                     self._ownership_lost.set()
                     self._stop_event.set()
                     return
+
             except Exception:
-                # A transient database issue should not kill the analysis
-                # thread. A later heartbeat can succeed before the stale
-                # threshold; recovery remains protected by attempt fencing.
+                # Retry a transient database error on the next interval.
                 logger.exception(
                     "Heartbeat failed for analysis job %s attempt %s",
                     self._job_id,
@@ -189,7 +188,7 @@ class AnalysisQueueDispatchError(RuntimeError):
     def __init__(self, job_id: UUID) -> None:
         super().__init__(
             "The analysis job remains queued, but queue dispatch failed. "
-            "Retry dispatch using the same job ID."
+            "The recovery task can retry dispatch."
         )
         self.job_id = job_id
 
@@ -197,11 +196,11 @@ class AnalysisQueueDispatchError(RuntimeError):
 class AnalysisWorkerService:
     """Claim, process, and atomically finalise analysis jobs.
 
-    The database repository owns job-state and finding integrity rules.
+    The database repository owns job-state and finding-integrity rules.
     This service owns orchestration and transaction boundaries.
 
-    Failed attempts are requeued up to max_attempts. The existing
-    repository's claimed-attempt check protects against stale workers.
+    Failed attempts are requeued up to max_attempts. Dispatch of each retry
+    uses a persisted lease to coordinate with recovery dispatch.
     """
 
     def __init__(
@@ -216,6 +215,7 @@ class AnalysisWorkerService:
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1.")
+
         if heartbeat_interval_seconds <= 0:
             raise ValueError("heartbeat_interval_seconds must be positive.")
 
@@ -255,6 +255,7 @@ class AnalysisWorkerService:
             raise
 
         heartbeat = None
+
         if self._heartbeat_session_factory is not None:
             heartbeat = _WorkerHeartbeat(
                 session_factory=self._heartbeat_session_factory,
@@ -273,8 +274,7 @@ class AnalysisWorkerService:
                     )
                 )
 
-                # Reject accidental cross-organisation or wrong-version
-                # results from the version loader.
+                # Reject cross-organisation or wrong-version data.
                 if loaded_version.organization_id != organization_id:
                     raise ValueError(
                         "The loaded version has an unexpected organisation."
@@ -310,7 +310,7 @@ class AnalysisWorkerService:
 
                 response = self._pipeline.analyze(context)
 
-                # Never persist a report against a different job or version.
+                # Never persist a report against another job or version.
                 if response.job_id != job_id:
                     raise ValueError(
                         "The analysis response references another job."
@@ -340,10 +340,7 @@ class AnalysisWorkerService:
                         "The analysis pipeline must return completed or partial."
                     )
 
-                # A conditional heartbeat can discover that recovery has already
-                # fenced off this attempt. Do not even attempt to persist findings
-                # after losing ownership; the repository's attempt check remains
-                # the final race-condition guard.
+                # Do not persist results if the heartbeat has lost ownership.
                 if heartbeat is not None and heartbeat.ownership_lost:
                     self._session.rollback()
                     return WorkerResult(
@@ -356,9 +353,8 @@ class AnalysisWorkerService:
                     list(response.findings)
                 )
 
-                # The repository atomically writes findings and finalises the
-                # job. It also updates the submission status only if this
-                # analysed version is still current.
+                # The repository atomically stores findings and finalises the
+                # job, updating submission state only if this version is current.
                 finalised = self._jobs.persist_findings_and_finish_job(
                     organization_id=organization_id,
                     job_id=job_id,
@@ -435,19 +431,26 @@ class AnalysisWorkerService:
                         attempts=claimed_attempt,
                     )
 
+                # Commit the queued state before trying to publish a message.
                 self._session.commit()
 
             except Exception:
                 self._session.rollback()
                 raise
 
-            # The job is committed as queued before dispatch. If dispatch
-            # fails, the durable job record remains available for recovery.
             try:
-                self._queue.enqueue_analysis(job_id)
+                enqueue_with_dispatch_lease(
+                    session=self._session,
+                    jobs=self._jobs,
+                    queue=self._queue,
+                    job_id=job_id,
+                )
+
             except Exception as exc:
                 raise AnalysisQueueDispatchError(job_id) from exc
 
+            # A false return means another dispatcher owns the lease (or the
+            # job changed state). The durable queued record remains recoverable.
             return WorkerResult(
                 job_id=job_id,
                 status="queued",
