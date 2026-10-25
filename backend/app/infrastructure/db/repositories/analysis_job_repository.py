@@ -1,8 +1,9 @@
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -162,20 +163,10 @@ class AnalysisJobRepository:
         self,
         job_id: UUID,
     ) -> AnalysisJob | None:
-        """Atomically claim a queued job using its persisted identity.
+        """Atomically claim a queued job.
 
-        Queue messages carry the job ID. The organisation scope is
-        derived from the persisted job row returned by the atomic
-        update, rather than supplied by the queue message.
-
-        Returns None when the job does not exist or has already been
-        claimed by another worker. The returned attempts value is the
-        claimed-attempt token for stale-worker protection.
-
-        started_at records the first-ever processing start and is
-        preserved across retries. updated_at is refreshed on each
-        successful claim. Recovery code should use updated_at as the
-        current staleness baseline, not started_at.
+        The returned attempts value is the claimed-attempt token.
+        Claiming initialises the heartbeat and clears any dispatch lease.
         """
         statement = (
             update(AnalysisJob)
@@ -190,6 +181,9 @@ class AnalysisJobRepository:
                     AnalysisJob.started_at,
                     func.now(),
                 ),
+                heartbeat_at=func.now(),
+                dispatch_lease_token=None,
+                dispatch_lease_expires_at=None,
                 completed_at=None,
                 error_code=None,
                 error_message=None,
@@ -217,6 +211,268 @@ class AnalysisJobRepository:
             .execution_options(populate_existing=True)
         )
 
+    def heartbeat_processing_job(
+        self,
+        job_id: UUID,
+        claimed_attempt: int,
+    ) -> bool:
+        """Refresh a heartbeat only for the currently owned attempt."""
+        statement = (
+            update(AnalysisJob)
+            .where(
+                AnalysisJob.id == job_id,
+                AnalysisJob.status == "processing",
+                AnalysisJob.attempts == claimed_attempt,
+            )
+            .values(
+                heartbeat_at=func.now(),
+                updated_at=func.now(),
+            )
+            .returning(AnalysisJob.id)
+        )
+
+        return self._session.scalar(statement) is not None
+
+    def list_stale_processing_jobs(
+        self,
+        stale_before: datetime,
+        limit: int,
+    ) -> list[AnalysisJob]:
+        """Return a bounded batch of jobs whose heartbeat is stale.
+
+        Jobs with a missing heartbeat are included for recovery rather
+        than remaining stuck indefinitely.
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1.")
+
+        statement = (
+            select(AnalysisJob)
+            .where(
+                AnalysisJob.status == "processing",
+                or_(
+                    AnalysisJob.heartbeat_at.is_(None),
+                    AnalysisJob.heartbeat_at < stale_before,
+                ),
+            )
+            .order_by(
+                AnalysisJob.heartbeat_at.asc().nullsfirst(),
+                AnalysisJob.created_at.asc(),
+                AnalysisJob.id.asc(),
+            )
+            .limit(limit)
+        )
+
+        return list(self._session.scalars(statement).all())
+
+    def recover_stale_processing_job(
+        self,
+        job_id: UUID,
+        expected_attempt: int,
+        stale_before: datetime,
+        max_attempts: int,
+    ) -> bool:
+        """Conditionally requeue or fail a stale processing job.
+
+        Status, attempt number, and heartbeat cutoff are checked by one
+        conditional UPDATE. If the attempt limit is exhausted, this method
+        marks the job failed and updates the submission status only when
+        the analysed version is still the submission's current version.
+
+        The job transition and submission update belong to the same
+        database transaction. The caller must commit or roll back.
+        """
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1.")
+
+        if expected_attempt < 1:
+            raise ValueError("expected_attempt must be at least 1.")
+
+        exhausted = expected_attempt >= max_attempts
+
+        if exhausted:
+            new_status = "failed"
+            error_code = "WORKER_HEARTBEAT_TIMEOUT"
+            error_message = (
+                "The worker heartbeat expired and the allowed attempts "
+                "were exhausted."
+            )
+            completed_at = func.now()
+        else:
+            new_status = "queued"
+            error_code = "WORKER_HEARTBEAT_TIMEOUT"
+            error_message = (
+                "The worker heartbeat expired. The job has been queued "
+                "for another attempt."
+            )
+            completed_at = None
+
+        statement = (
+            update(AnalysisJob)
+            .where(
+                AnalysisJob.id == job_id,
+                AnalysisJob.status == "processing",
+                AnalysisJob.attempts == expected_attempt,
+                or_(
+                    AnalysisJob.heartbeat_at.is_(None),
+                    AnalysisJob.heartbeat_at < stale_before,
+                ),
+            )
+            .values(
+                status=new_status,
+                completed_at=completed_at,
+                error_code=error_code,
+                error_message=error_message,
+                heartbeat_at=None,
+                dispatch_lease_token=None,
+                dispatch_lease_expires_at=None,
+                updated_at=func.now(),
+            )
+            .returning(
+                AnalysisJob.organization_id,
+                AnalysisJob.submission_version_id,
+            )
+        )
+
+        recovered_row = self._session.execute(statement).one_or_none()
+
+        if recovered_row is None:
+            return False
+
+        if exhausted:
+            organization_id, submission_version_id = recovered_row
+
+            version = self._session.scalar(
+                select(SubmissionVersion).where(
+                    SubmissionVersion.organization_id == organization_id,
+                    SubmissionVersion.id == submission_version_id,
+                )
+            )
+
+            if version is None:
+                raise LookupError(
+                    "Submission version not found while finalising "
+                    "an exhausted analysis job."
+                )
+
+            # The conditional UPDATE avoids changing submission status
+            # if a newer version became current during recovery.
+            self._session.execute(
+                update(Submission)
+                .where(
+                    Submission.organization_id == organization_id,
+                    Submission.id == version.submission_id,
+                    Submission.current_version_number == version.version_number,
+                )
+                .values(status="failed_needs_attention")
+            )
+
+        return True
+
+    def list_queued_jobs_for_recovery(
+        self,
+        limit: int,
+    ) -> list[AnalysisJob]:
+        """Return queued jobs with no active dispatch lease."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1.")
+
+        lease_available = or_(
+            AnalysisJob.dispatch_lease_token.is_(None),
+            AnalysisJob.dispatch_lease_expires_at.is_(None),
+            AnalysisJob.dispatch_lease_expires_at <= func.now(),
+        )
+
+        statement = (
+            select(AnalysisJob)
+            .where(
+                AnalysisJob.status == "queued",
+                lease_available,
+            )
+            .order_by(
+                AnalysisJob.created_at.asc(),
+                AnalysisJob.id.asc(),
+            )
+            .limit(limit)
+        )
+
+        return list(self._session.scalars(statement).all())
+
+    def acquire_dispatch_lease(
+        self,
+        job_id: UUID,
+        lease_token: UUID | str,
+        lease_expires_at: datetime,
+        stale_before: datetime | None = None,
+    ) -> bool:
+        """Acquire a dispatch lease for a queued job, if available.
+
+        UUID tokens are stored as strings. An optional stale_before cutoff
+        can restrict acquisition to older jobs. The conditional UPDATE
+        rechecks status and lease availability atomically.
+        """
+        token = str(lease_token).strip()
+
+        if not token:
+            raise ValueError("lease_token must not be empty.")
+
+        if (
+            lease_expires_at.tzinfo is None
+            or lease_expires_at.utcoffset() is None
+        ):
+            raise ValueError("lease_expires_at must be timezone-aware.")
+
+        conditions = [
+            AnalysisJob.id == job_id,
+            AnalysisJob.status == "queued",
+            or_(
+                AnalysisJob.dispatch_lease_token.is_(None),
+                AnalysisJob.dispatch_lease_expires_at.is_(None),
+                AnalysisJob.dispatch_lease_expires_at <= func.now(),
+            ),
+        ]
+
+        if stale_before is not None:
+            if stale_before.tzinfo is None or stale_before.utcoffset() is None:
+                raise ValueError("stale_before must be timezone-aware.")
+            conditions.append(AnalysisJob.updated_at <= stale_before)
+
+        statement = (
+            update(AnalysisJob)
+            .where(*conditions)
+            .values(
+                dispatch_lease_token=token,
+                dispatch_lease_expires_at=lease_expires_at,
+                updated_at=func.now(),
+            )
+            .returning(AnalysisJob.id)
+        )
+
+        return self._session.scalar(statement) is not None
+
+    def release_dispatch_lease(
+        self,
+        job_id: UUID,
+        lease_token: UUID | str,
+    ) -> bool:
+        """Release a dispatch lease only when the caller still owns it."""
+        statement = (
+            update(AnalysisJob)
+            .where(
+                AnalysisJob.id == job_id,
+                AnalysisJob.status == "queued",
+                AnalysisJob.dispatch_lease_token == str(lease_token),
+            )
+            .values(
+                dispatch_lease_token=None,
+                dispatch_lease_expires_at=None,
+                updated_at=func.now(),
+            )
+            .returning(AnalysisJob.id)
+        )
+
+        return self._session.scalar(statement) is not None
+
     def update_job_status(
         self,
         organization_id: UUID,
@@ -229,18 +485,9 @@ class AnalysisJobRepository:
     ) -> AnalysisJob | None:
         """Apply a non-terminal status transition safely.
 
-        Queued -> processing must use claim_queued_job(), which increments
-        the attempt count atomically.
-
-        Processing -> queued requires the current claimed_attempt token
-        and uses it as part of the conditional UPDATE.
-
-        Completed, partial, and failed are terminal states. They must be
-        written through persist_findings_and_finish_job(), which locks
-        the job and validates the claimed attempt before finalisation.
-
-        Returns None when the scoped job or expected state/attempt does
-        not match. The application service owns commits and rollbacks.
+        Processing -> queued requires the current attempt token.
+        Terminal states must be written through
+        persist_findings_and_finish_job().
         """
         if expected_status not in JOB_STATUSES:
             raise ValueError(
@@ -294,6 +541,13 @@ class AnalysisJobRepository:
             "updated_at": func.now(),
         }
 
+        if expected_status == "processing" and new_status == "queued":
+            values.update(
+                heartbeat_at=None,
+                dispatch_lease_token=None,
+                dispatch_lease_expires_at=None,
+            )
+
         conditions = [
             AnalysisJob.organization_id == organization_id,
             AnalysisJob.id == job_id,
@@ -329,16 +583,7 @@ class AnalysisJobRepository:
         organization_id: UUID,
         findings: Sequence[Mapping[str, Any]],
     ) -> None:
-        """Validate source provenance for new findings.
-
-        Approved versions are valid sources. Archived versions are also
-        valid historical sources only when approval metadata proves that
-        they were approved before archival. Draft or otherwise unapproved
-        versions and cross-organisation references are rejected.
-
-        New analysis must select from currently applicable approved
-        versions and retain the exact version IDs it used.
-        """
+        """Validate source provenance for new findings."""
         for index, finding in enumerate(findings):
             rule_version_id = finding.get("source_rule_version_id")
 
@@ -397,17 +642,12 @@ class AnalysisJobRepository:
         """Persist findings and finalise the claimed job in one transaction.
 
         Returns False if the job is no longer processing or the attempt
-        token is stale. In that case, no findings or final status changes
-        are written.
-
-        Duplicate fingerprints within the same job are ignored.
-        Referenced rule/fact versions must have valid approval provenance
-        and belong to the same organization as the job.
+        token is stale. No findings or final status changes are written
+        in that case.
 
         Submission status is updated only if the analysed version is
-        still the submission's current version.
-
-        The application service must commit or roll back the transaction.
+        still the submission's current version. The application service
+        must commit or roll back the transaction.
         """
         if final_status not in TERMINAL_JOB_STATUSES:
             raise ValueError(
@@ -469,10 +709,7 @@ class AnalysisJobRepository:
                 "Submission version does not match the analysis job."
             )
 
-        if (
-            job.status != "processing"
-            or job.attempts != claimed_attempt
-        ):
+        if job.status != "processing" or job.attempts != claimed_attempt:
             return False
 
         version = self._session.scalar(
@@ -487,8 +724,6 @@ class AnalysisJobRepository:
                 "Submission version not found within the specified organization."
             )
 
-        # Validate source references only after checking the attempt token.
-        # A stale worker returns False and cannot write findings.
         self._validate_source_versions(
             organization_id=organization_id,
             findings=prepared_findings,
@@ -536,6 +771,9 @@ class AnalysisJobRepository:
         job.completed_at = func.now()
         job.error_code = error_code
         job.error_message = error_message
+        job.heartbeat_at = None
+        job.dispatch_lease_token = None
+        job.dispatch_lease_expires_at = None
 
         if (
             submission is not None

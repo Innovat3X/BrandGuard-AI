@@ -52,6 +52,8 @@ def test_factory_wires_worker_dependencies():
         pipeline,
         queue,
         max_attempts=5,
+        heartbeat_session_factory=None,
+        heartbeat_interval_seconds=60.0,
     )
 
     assert result is expected_worker
@@ -83,6 +85,8 @@ def test_factory_uses_default_attempt_limit():
         pipeline_builder.return_value,
         queue,
         max_attempts=3,
+        heartbeat_session_factory=None,
+        heartbeat_interval_seconds=60.0,
     )
 
 
