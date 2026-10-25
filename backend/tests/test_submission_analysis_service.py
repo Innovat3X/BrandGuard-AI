@@ -306,6 +306,14 @@ def test_request_analysis_skips_when_another_dispatcher_has_the_lease(
     submission_id, _, job_id = configure_queued_job(submissions, jobs)
     jobs.acquire_dispatch_lease.return_value = False
 
+    # Simulate the persisted row after the conditional lease update failed:
+    # the job is still queued and another dispatcher holds a live lease.
+    session.execute.return_value.one_or_none.return_value = (
+        "queued",
+        "another-dispatcher-token",
+        True,
+    )
+
     result = service.request_analysis(
         organization_id=uuid4(),
         submission_id=submission_id,

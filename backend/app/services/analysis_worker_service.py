@@ -20,6 +20,7 @@ from app.infrastructure.db.repositories.analysis_job_repository import (
     AnalysisJobRepository,
 )
 from app.services.analysis_dispatch import (
+    DispatchOutcome,
     enqueue_with_dispatch_lease,
 )
 from app.services.analysis_persistence_mapper import (
@@ -138,6 +139,7 @@ class WorkerResult:
     attempts: int = 0
     finding_count: int = 0
     retry_scheduled: bool = False
+    dispatch_outcome: str | None = None
 
 
 class SubmissionVersionLoader(Protocol):
@@ -439,7 +441,7 @@ class AnalysisWorkerService:
                 raise
 
             try:
-                enqueue_with_dispatch_lease(
+                outcome = enqueue_with_dispatch_lease(
                     session=self._session,
                     jobs=self._jobs,
                     queue=self._queue,
@@ -449,13 +451,41 @@ class AnalysisWorkerService:
             except Exception as exc:
                 raise AnalysisQueueDispatchError(job_id) from exc
 
-            # A false return means another dispatcher owns the lease (or the
-            # job changed state). The durable queued record remains recoverable.
+            if outcome is DispatchOutcome.NOT_ELIGIBLE:
+                return WorkerResult(
+                    job_id=job_id,
+                    status="stale",
+                    attempts=claimed_attempt,
+                    retry_scheduled=False,
+                    dispatch_outcome=outcome.value,
+                )
+
+            if outcome is DispatchOutcome.RETRY_REQUIRED:
+                return WorkerResult(
+                    job_id=job_id,
+                    status="queued",
+                    attempts=claimed_attempt,
+                    retry_scheduled=False,
+                    dispatch_outcome=outcome.value,
+                )
+
+            if outcome is DispatchOutcome.LEASE_UNAVAILABLE:
+                # A competing dispatcher owns a live lease. It may publish
+                # the message; if it fails, recovery can retry after release.
+                return WorkerResult(
+                    job_id=job_id,
+                    status="queued",
+                    attempts=claimed_attempt,
+                    retry_scheduled=True,
+                    dispatch_outcome=outcome.value,
+                )
+
             return WorkerResult(
                 job_id=job_id,
                 status="queued",
                 attempts=claimed_attempt,
                 retry_scheduled=True,
+                dispatch_outcome=DispatchOutcome.DISPATCHED.value,
             )
 
         try:

@@ -243,10 +243,18 @@ def test_retry_does_not_publish_if_another_dispatcher_owns_lease(
     )
     ctx["jobs"].acquire_dispatch_lease.return_value = False
 
+    # The job is still queued, and another dispatcher holds a live lease.
+    ctx["session"].execute.return_value.one_or_none.return_value = (
+        "queued",
+        "another-dispatcher-token",
+        True,
+    )
+
     result = ctx["worker"].process_job(ctx["job_id"])
 
     assert result.status == "queued"
     assert result.retry_scheduled is True
+    assert result.dispatch_outcome == "lease_unavailable"
 
     ctx["jobs"].acquire_dispatch_lease.assert_called_once()
     ctx["queue"].enqueue_analysis.assert_not_called()

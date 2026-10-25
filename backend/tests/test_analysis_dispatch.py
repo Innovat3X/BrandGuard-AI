@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 
 from app.services.analysis_dispatch import (
+    DispatchOutcome,
     enqueue_with_dispatch_lease,
 )
 
@@ -21,6 +22,11 @@ def build_dispatch():
     return session, jobs, queue, job_id
 
 
+def set_dispatch_state(session, state):
+    """Configure the row returned by the dispatch-state query."""
+    session.execute.return_value.one_or_none.return_value = state
+
+
 def test_dispatch_commits_lease_before_publishing():
     session, jobs, queue, job_id = build_dispatch()
     events = []
@@ -30,14 +36,14 @@ def test_dispatch_commits_lease_before_publishing():
         "enqueue"
     )
 
-    dispatched = enqueue_with_dispatch_lease(
+    outcome = enqueue_with_dispatch_lease(
         session=session,
         jobs=jobs,
         queue=queue,
         job_id=job_id,
     )
 
-    assert dispatched is True
+    assert outcome is DispatchOutcome.DISPATCHED
     assert events == ["commit", "enqueue"]
 
     jobs.acquire_dispatch_lease.assert_called_once()
@@ -51,18 +57,77 @@ def test_dispatch_commits_lease_before_publishing():
     jobs.release_dispatch_lease.assert_not_called()
 
 
-def test_dispatch_skips_when_lease_is_unavailable():
+def test_dispatch_returns_lease_unavailable_for_a_live_competing_lease():
     session, jobs, queue, job_id = build_dispatch()
     jobs.acquire_dispatch_lease.return_value = False
+    set_dispatch_state(
+        session,
+        ("queued", "another-dispatcher-token", True),
+    )
 
-    dispatched = enqueue_with_dispatch_lease(
+    outcome = enqueue_with_dispatch_lease(
         session=session,
         jobs=jobs,
         queue=queue,
         job_id=job_id,
     )
 
-    assert dispatched is False
+    assert outcome is DispatchOutcome.LEASE_UNAVAILABLE
+    session.rollback.assert_called_once()
+    session.commit.assert_not_called()
+    queue.enqueue_analysis.assert_not_called()
+    jobs.release_dispatch_lease.assert_not_called()
+
+
+def test_dispatch_returns_not_eligible_when_job_is_no_longer_queued():
+    session, jobs, queue, job_id = build_dispatch()
+    jobs.acquire_dispatch_lease.return_value = False
+    set_dispatch_state(session, ("processing", None, False))
+
+    outcome = enqueue_with_dispatch_lease(
+        session=session,
+        jobs=jobs,
+        queue=queue,
+        job_id=job_id,
+    )
+
+    assert outcome is DispatchOutcome.NOT_ELIGIBLE
+    session.rollback.assert_called_once()
+    session.commit.assert_not_called()
+    queue.enqueue_analysis.assert_not_called()
+    jobs.release_dispatch_lease.assert_not_called()
+
+
+def test_dispatch_returns_not_eligible_when_job_does_not_exist():
+    session, jobs, queue, job_id = build_dispatch()
+    jobs.acquire_dispatch_lease.return_value = False
+    set_dispatch_state(session, None)
+
+    outcome = enqueue_with_dispatch_lease(
+        session=session,
+        jobs=jobs,
+        queue=queue,
+        job_id=job_id,
+    )
+
+    assert outcome is DispatchOutcome.NOT_ELIGIBLE
+    queue.enqueue_analysis.assert_not_called()
+    jobs.release_dispatch_lease.assert_not_called()
+
+
+def test_dispatch_returns_retry_required_for_lease_expiry_race():
+    session, jobs, queue, job_id = build_dispatch()
+    jobs.acquire_dispatch_lease.return_value = False
+    set_dispatch_state(session, ("queued", None, False))
+
+    outcome = enqueue_with_dispatch_lease(
+        session=session,
+        jobs=jobs,
+        queue=queue,
+        job_id=job_id,
+    )
+
+    assert outcome is DispatchOutcome.RETRY_REQUIRED
     session.rollback.assert_called_once()
     session.commit.assert_not_called()
     queue.enqueue_analysis.assert_not_called()
