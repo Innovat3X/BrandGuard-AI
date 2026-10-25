@@ -1,149 +1,157 @@
-# \# Analysis Worker and Recovery Integration
+﻿# BrandGuard AI
 
-#
+AI-powered brand governance platform for reviewing content against approved brand terminology and available brand knowledge before publication.
 
-# This document describes the integrated implementation on
+## Prototype capabilities
 
-# `feat/m4-persistence-integration`. The worker-recovery and persistence
+The current prototype supports:
 
-# changes have been integrated; this is no longer a draft integration.
+- User registration and login.
+- Organisation-scoped text submissions.
+- Asynchronous analysis jobs using Celery and RabbitMQ.
+- Analysis job-status polling.
+- Persisted findings linked to a specific submission version.
+- Deterministic checks against approved terminology rules.
+- Explanations, evidence, and suggested corrections where supported.
+- Worker heartbeats, dispatch leases, and stale-job recovery.
+- Human review of analysis results.
 
-#
+### Current limitations
 
-# \## Implemented
+- File-based submissions are not enabled. Submit pasted text.
+- Claim extraction is not configured by default. Factual checks that cannot be completed reliably must be represented as unavailable, not passed.
+- Some dashboard sample records, brand-library entries, review actions, and analytics remain illustrative rather than connected to backend persistence.
+- Findings are review signals. Human reviewers remain responsible for publication decisions.
 
-#
+## Technology stack
 
-# \- Database-backed analysis jobs, with PostgreSQL as the source of truth.
+- **Frontend:** Next.js, React, TypeScript, Tailwind CSS
+- **API:** Python 3.12, FastAPI, Pydantic
+- **Database:** PostgreSQL, SQLAlchemy, Alembic
+- **Background processing:** Celery and RabbitMQ
+- **Analysis:** Deterministic terminology rules and structured analysis components
 
-# \- Celery/RabbitMQ dispatch using the dedicated `analysis` queue.
+Shared contracts are maintained in `docs/contracts/`:
+- `api-v1.md`
+- `data-model.md`
+- `analysis-result.md`
 
-# \- Conditional worker claims, attempt tracking, and heartbeats.
+## Local setup — Windows PowerShell
 
-# \- Persisted findings associated with the correct submission version.
+### Prerequisites
 
-# \- Dispatch leases to protect job publication and recovery paths.
+Install Python 3.12, Node.js/npm, PostgreSQL, and Docker Desktop.
 
-# \- Stale-job recovery scheduled every 60 seconds through Celery Beat.
+### 1. Configure environment variables
 
-# \- Organisation-scoped submission, job-status, and version-specific
+From the repository root:
 
-# &#x20; findings endpoints.
+```powershell
+Copy-Item .env.example .env
+```
 
-# \- Unavailable factual checks are not treated as passing checks.
+Edit `.env` and configure `DATABASE_URL` for your PostgreSQL database. Replace `JWT_SECRET_KEY` with a unique random secret of at least 32 characters.
 
-#
+Never commit `.env` or production secrets.
 
-# \## Required database migration
+### 2. Start RabbitMQ
 
-#
+```powershell
+docker compose up -d rabbitmq
+```
 
-# Migration `4b71e8d29c60\_add\_analysis\_job\_recovery\_fields.py` adds:
+Ensure PostgreSQL is running and the database named in `DATABASE_URL` exists.
 
-#
+### 3. Install backend dependencies and apply migrations
 
-# \- `analysis\_jobs.heartbeat\_at`
+From the repository root:
 
-# \- `analysis\_jobs.dispatch\_lease\_token`
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r backend\requirements.txt
+python -m alembic -c backend\alembic.ini upgrade head
+```
 
-# \- `analysis\_jobs.dispatch\_lease\_expires\_at`
+Apply migrations after pulling code that adds or changes database migrations. Make sure `.env` points to the same database used by the API and worker.
 
-#
+### 4. Start the API
 
-# Run the following from the repository root:
+From the repository root:
 
-#
+```powershell
+python -m uvicorn app.main:app --app-dir backend --reload
+```
 
-# ```powershell
+- Health endpoint: `http://localhost:8000/health`
+- API documentation: `http://localhost:8000/docs`
 
-# python -m alembic -c backend\\alembic.ini current
+### 5. Start the analysis worker
 
-# python -m alembic -c backend\\alembic.ini upgrade head
+Open another terminal. From the repository root, run:
 
-# python -m alembic -c backend\\alembic.ini current
+```powershell
+.\.venv\Scripts\python.exe -m celery -A app.workers.celery_app.celery_app worker --loglevel=INFO --pool=solo -Q analysis
+```
 
-# ```
+### 6. Start Celery Beat
 
-#
+Open another terminal and run:
 
-# Ensure `.env` points to the same PostgreSQL database used by the API
+```powershell
+.\.venv\Scripts\python.exe -m celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+```
 
-# and worker. A backend process may start even when the database schema
+Celery Beat is required for scheduled stale-job recovery. Run only one scheduler for this configuration.
 
-# is behind, but analysis queueing can then fail when it queries the
+### 7. Start the frontend
 
-# missing recovery columns.
+Open another terminal:
 
-#
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
 
-# \## Process requirements
+Open `http://localhost:3000`.
 
-#
+The frontend API client defaults to `http://localhost:8000`. Configure `NEXT_PUBLIC_API_BASE_URL` before building or starting the frontend if the API has a different origin.
 
-# Run the API, analysis worker, and Celery Beat as separate processes.
+Register an account at `/register`, then sign in at `/login`. Submit text through **New analysis**.
 
-# RabbitMQ and PostgreSQL must be available.
+## Verification
 
-#
+From the repository root:
 
-# From the repository root, the worker command is:
+```powershell
+python -m pytest backend/tests -q
+git diff --check
+```
 
-#
+From the `frontend` directory:
 
-# ```powershell
+```powershell
+npm run lint
+npm run build
+```
 
-# .\\.venv\\Scripts\\python.exe -m celery -A app.workers.celery\_app.celery\_app worker --loglevel=INFO --pool=solo -Q analysis
+A passing unit-test suite does not replace a live end-to-end test with PostgreSQL, RabbitMQ, the API, the worker, Celery Beat, and the browser running together.
 
-# ```
+## Deployment and security
 
-#
+- Use a strong, unique JWT secret.
+- Use managed or properly secured PostgreSQL and RabbitMQ services.
+- Configure production CORS to allow only the deployed frontend origin.
+- Use TLS and secure database/broker connections.
+- Configure production environment variables through the hosting provider, not committed files.
+- Run database migrations before serving application traffic.
+- Keep human review in the publication workflow.
 
-# Start the scheduler in another terminal:
+This is a prototype. Do not rely on it as the sole control for legal, factual, safety, or publication approval.
 
-#
+## Repository
 
-# ```powershell
+[GitHub repository](https://github.com/Innovat3X/BrandGuard-AI)
 
-# .\\.venv\\Scripts\\python.exe -m celery -A app.workers.celery\_app.celery\_app beat --loglevel=INFO
-
-# ```
-
-#
-
-# Only one Beat scheduler should run for this configuration.
-
-#
-
-# \## Validation
-
-#
-
-# The integrated branch previously passed the full backend test suite:
-
-# \*\*364 passed, 1 warning\*\*. `git diff --check` also passed.
-
-#
-
-# A live smoke test exposed a database-schema mismatch. The missing
-
-# recovery migration was applied to the database used by the local API,
-
-# after which the live prototype workflow worked.
-
-#
-
-# Repeat the test suite and a live end-to-end test against the actual
-
-# deployment configuration before release.
-
-#
-
-# \## Prototype limitations
-
-#
-
-# Claim extraction is not configured by default. Some dashboard records,
-
-# brand-library content, review actions, and analytics remain illustrative.
-
-# Analysis findings support human review and do not replace human approval.
+[Integration pull request #4](https://github.com/Innovat3X/BrandGuard-AI/pull/4)
