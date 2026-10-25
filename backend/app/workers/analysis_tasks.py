@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from app.infrastructure.db.session import get_session_factory
+from app.services.analysis_recovery_service import AnalysisRecoveryService
 from app.services.analysis_worker_factory import (
     build_analysis_worker_service,
 )
@@ -10,6 +11,7 @@ from app.workers.celery_app import celery_app
 
 
 ANALYSIS_TASK_NAME = "app.workers.analysis_tasks.process_analysis_job"
+RECOVERY_TASK_NAME = "app.workers.analysis_tasks.recover_stale_analysis_jobs"
 ANALYSIS_QUEUE_NAME = "analysis"
 
 
@@ -55,6 +57,7 @@ def process_analysis_job(job_id: str) -> dict[str, str]:
         worker = build_analysis_worker_service(
             session,
             queue,
+            heartbeat_session_factory=session_factory,
         )
 
         result = worker.process_job(parsed_job_id)
@@ -69,3 +72,20 @@ def process_analysis_job(job_id: str) -> dict[str, str]:
             "job_id": str(result.job_id),
             "status": str(result_status),
         }
+
+@celery_app.task(name=RECOVERY_TASK_NAME)
+def recover_stale_analysis_jobs() -> dict[str, int]:
+    """Recover stale processing jobs and queued jobs without a live lease.
+
+    This task is triggered periodically by Celery Beat. Recovery state changes
+    and dispatch leases are guarded by conditional repository operations.
+    """
+
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        recovery = AnalysisRecoveryService(
+            session=session,
+            queue=CeleryAnalysisJobQueue(),
+        )
+        result = recovery.run_once()
+        return result.as_dict()

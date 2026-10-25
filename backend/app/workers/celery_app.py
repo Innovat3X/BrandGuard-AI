@@ -73,6 +73,14 @@ celery_app.conf.update(
         "interval_max": 1,
     },
 
+    # A dedicated Celery Beat process must be running for stale-job recovery.
+    beat_schedule={
+        "recover-stale-analysis-jobs-every-minute": {
+            "task": "app.workers.analysis_tasks.recover_stale_analysis_jobs",
+            "schedule": 60.0,
+        },
+    },
+
     # RabbitMQ 4.3 compatibility: transient control/event queues must
     # be exclusive rather than non-durable and non-exclusive.
     control_queue_exclusive=True,
