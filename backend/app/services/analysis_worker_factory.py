@@ -1,4 +1,7 @@
+
 """Composition factory for the database-backed analysis worker."""
+
+import os
 
 from sqlalchemy.orm import Session
 
@@ -25,14 +28,19 @@ def build_analysis_worker_service(
     heartbeat_session_factory: HeartbeatSessionFactory | None = None,
     heartbeat_interval_seconds: float = 60.0,
 ) -> AnalysisWorkerService:
-    """Build a worker with database loading and analysis dependencies.
-
-    This factory creates the worker service. It does not start a
-    background consumer or schedule jobs.
-    """
+    """Build a worker with database loading and analysis dependencies."""
 
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1.")
+
+    # Preserve explicit injection for tests and alternate providers.
+    # Enable OpenAI extraction only when a key is configured.
+    if claim_extractor is None and os.getenv("OPENAI_API_KEY", "").strip():
+        from app.analysis.openai_claim_provider import (
+            build_openai_claim_extractor,
+        )
+
+        claim_extractor = build_openai_claim_extractor()
 
     submission_loader = DatabaseSubmissionVersionLoader(session)
 
