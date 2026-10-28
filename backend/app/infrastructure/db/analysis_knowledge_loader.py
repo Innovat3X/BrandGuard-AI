@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -48,6 +49,8 @@ class ApprovedFactVersionRecord:
     approved_at: datetime
     effective_from: datetime | None
     expires_at: datetime | None
+    fact_key: str | None = None
+    structured_value: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,15 +90,7 @@ class DatabaseAnalysisKnowledgeLoader:
         organization_id: UUID,
         as_of: datetime | None = None,
     ) -> LoadedApprovedKnowledge:
-        """Load the latest applicable approved versions.
-
-        The caller must supply trusted organisation context obtained
-        from the persisted analysis job, not from a client request.
-
-        A result count equal to a configured limit is treated as
-        potentially truncated. The loader fails closed rather than
-        silently analysing an incomplete set of approved records.
-        """
+        """Load applicable approved versions in the requested organisation."""
 
         effective_at = as_of or datetime.now(timezone.utc)
 
@@ -128,29 +123,25 @@ class DatabaseAnalysisKnowledgeLoader:
             record_type="approved fact versions",
         )
 
-        rule_records = tuple(
-            self._map_rule(
-                rule,
-                organization_id=organization_id,
-                as_of=effective_at,
-            )
-            for rule in rules
-        )
-
-        fact_records = tuple(
-            self._map_fact(
-                fact,
-                organization_id=organization_id,
-                as_of=effective_at,
-            )
-            for fact in facts
-        )
-
         return LoadedApprovedKnowledge(
             organization_id=organization_id,
             as_of=effective_at,
-            rule_versions=rule_records,
-            fact_versions=fact_records,
+            rule_versions=tuple(
+                self._map_rule(
+                    rule,
+                    organization_id=organization_id,
+                    as_of=effective_at,
+                )
+                for rule in rules
+            ),
+            fact_versions=tuple(
+                self._map_fact(
+                    fact,
+                    organization_id=organization_id,
+                    as_of=effective_at,
+                )
+                for fact in facts
+            ),
         )
 
     @staticmethod
@@ -216,13 +207,10 @@ class DatabaseAnalysisKnowledgeLoader:
         )
 
         if rule.effective_from is not None:
-            if (
-                rule.effective_from.tzinfo is None
-                or rule.effective_from.utcoffset() is None
-            ):
-                raise IncompleteApprovedKnowledgeError(
-                    "A rule version has a naive effective_from timestamp."
-                )
+            cls._validate_timestamp(
+                rule.effective_from,
+                "A rule version has a naive effective_from timestamp.",
+            )
 
             if rule.effective_from > as_of:
                 raise IncompleteApprovedKnowledgeError(
@@ -264,13 +252,10 @@ class DatabaseAnalysisKnowledgeLoader:
         )
 
         if fact.effective_from is not None:
-            if (
-                fact.effective_from.tzinfo is None
-                or fact.effective_from.utcoffset() is None
-            ):
-                raise IncompleteApprovedKnowledgeError(
-                    "A fact version has a naive effective_from timestamp."
-                )
+            cls._validate_timestamp(
+                fact.effective_from,
+                "A fact version has a naive effective_from timestamp.",
+            )
 
             if fact.effective_from > as_of:
                 raise IncompleteApprovedKnowledgeError(
@@ -278,17 +263,37 @@ class DatabaseAnalysisKnowledgeLoader:
                 )
 
         if fact.expires_at is not None:
-            if (
-                fact.expires_at.tzinfo is None
-                or fact.expires_at.utcoffset() is None
-            ):
-                raise IncompleteApprovedKnowledgeError(
-                    "A fact version has a naive expires_at timestamp."
-                )
+            cls._validate_timestamp(
+                fact.expires_at,
+                "A fact version has a naive expires_at timestamp.",
+            )
 
             if fact.expires_at <= as_of:
                 raise IncompleteApprovedKnowledgeError(
                     "An expired fact version was returned as active."
+                )
+
+        fact_key = getattr(fact, "fact_key", None)
+        structured_value = getattr(fact, "structured_value", None)
+
+        if (fact_key is None) != (structured_value is None):
+            raise IncompleteApprovedKnowledgeError(
+                "A fact version must provide both fact_key and "
+                "structured_value, or neither."
+            )
+
+        if structured_value is not None:
+            if not isinstance(structured_value, dict):
+                raise IncompleteApprovedKnowledgeError(
+                    "A structured fact value must be a JSON object."
+                )
+
+            if not all(
+                key in structured_value
+                for key in ("kind", "value", "unit")
+            ):
+                raise IncompleteApprovedKnowledgeError(
+                    "A structured fact must include kind, value and unit."
                 )
 
         return ApprovedFactVersionRecord(
@@ -302,4 +307,18 @@ class DatabaseAnalysisKnowledgeLoader:
             approved_at=fact.approved_at,
             effective_from=fact.effective_from,
             expires_at=fact.expires_at,
+            fact_key=fact_key,
+            structured_value=(
+                dict(structured_value)
+                if structured_value is not None
+                else None
+            ),
         )
+
+    @staticmethod
+    def _validate_timestamp(
+        value: datetime,
+        error_message: str,
+    ) -> None:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise IncompleteApprovedKnowledgeError(error_message)
