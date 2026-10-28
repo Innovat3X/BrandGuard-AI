@@ -2,7 +2,12 @@
 
 from sqlalchemy.orm import Session
 
+from app.analysis.claim_extraction import extract_structured_claims
 from app.analysis.pipeline import run_analysis
+from app.core.settings import get_settings
+from app.infrastructure.ai.openai_compatible import (
+    OpenAICompatibleBrandAnalysisProvider,
+)
 from app.infrastructure.db.analysis_knowledge_loader import (
     DatabaseAnalysisKnowledgeLoader,
 )
@@ -25,18 +30,9 @@ def build_database_analysis_pipeline(
     rule_limit: int = 100,
     fact_limit: int = 100,
 ) -> DatabaseAnalysisPipeline:
-    """Build a database-backed pipeline using the real analysis runner.
+    """Build the analysis pipeline with optional real AI integration."""
 
-    A custom runner can be injected for tests. Otherwise, the existing
-    app.analysis.pipeline.run_analysis function is used.
-
-    Until a claim extractor is supplied, factual-claim extraction is
-    reported as unavailable by the analysis runner.
-
-    The current fact schema does not contain structured fact keys or
-    canonical comparison values. Non-empty free-text fact sets therefore
-    remain unavailable for structured claim verification.
-    """
+    settings = get_settings()
 
     knowledge_loader = DatabaseAnalysisKnowledgeLoader(
         session,
@@ -44,12 +40,24 @@ def build_database_analysis_pipeline(
         fact_limit=fact_limit,
     )
 
-    return DatabaseAnalysisPipeline(
-        knowledge_loader=knowledge_loader,
-        analysis_runner=(
+    pipeline_kwargs = {
+        "knowledge_loader": knowledge_loader,
+        "analysis_runner": (
             run_analysis if analysis_runner is None else analysis_runner
         ),
-        rule_mapper=map_approved_terminology_rules,
-        fact_mapper=map_approved_facts,
-        claim_extractor=claim_extractor,
-    )
+        "rule_mapper": map_approved_terminology_rules,
+        "fact_mapper": map_approved_facts,
+        "claim_extractor": (
+            extract_structured_claims
+            if claim_extractor is None
+            else claim_extractor
+        ),
+    }
+
+    # Preserve deterministic-only behavior unless AI is explicitly enabled.
+    if settings.ai_provider == "openai_compatible":
+        pipeline_kwargs["ai_analysis_provider"] = (
+            OpenAICompatibleBrandAnalysisProvider(settings)
+        )
+
+    return DatabaseAnalysisPipeline(**pipeline_kwargs)
