@@ -107,3 +107,48 @@ def test_factory_uses_default_claim_extractor():
         fact_mapper=map_approved_facts,
         claim_extractor=extract_structured_claims,
     )
+
+
+def test_factory_injects_ai_provider_when_enabled():
+    settings = type(
+        "SettingsStub",
+        (),
+        {"ai_provider": "openai_compatible"},
+    )()
+
+    session = object()
+    analysis_runner = object()
+
+    with (
+        patch(
+            "app.services.analysis_pipeline_factory.get_settings",
+            return_value=settings,
+        ),
+        patch(
+            "app.services.analysis_pipeline_factory."
+            "DatabaseAnalysisKnowledgeLoader"
+        ) as loader_class,
+        patch(
+            "app.services.analysis_pipeline_factory."
+            "DatabaseAnalysisPipeline"
+        ) as pipeline_class,
+        patch(
+            "app.services.analysis_pipeline_factory."
+            "OpenAICompatibleBrandAnalysisProvider"
+        ) as ai_provider_class,
+    ):
+        build_database_analysis_pipeline(
+            session,
+            analysis_runner=analysis_runner,
+        )
+
+    ai_provider_class.assert_called_once_with(settings)
+
+    pipeline_class.assert_called_once_with(
+        knowledge_loader=loader_class.return_value,
+        analysis_runner=analysis_runner,
+        rule_mapper=map_approved_terminology_rules,
+        fact_mapper=map_approved_facts,
+        claim_extractor=extract_structured_claims,
+        ai_analysis_provider=ai_provider_class.return_value,
+    )
