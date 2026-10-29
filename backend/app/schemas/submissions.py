@@ -17,6 +17,11 @@ class SubmissionCreatedResponse(BaseModel):
 class QueueAnalysisRequest(BaseModel):
     version_number: int | None = Field(default=None, ge=1)
 
+    requested_checks: (
+        dict[Literal["tone", "messaging", "terminology", "factual_claim"], bool]
+        | None
+    ) = None
+
 
 class AnalysisAcceptedResponse(BaseModel):
     job_id: UUID

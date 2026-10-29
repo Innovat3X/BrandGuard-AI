@@ -154,12 +154,31 @@ def queue_submission_analysis(
         else submission.current_version_number
     )
 
-    # Stable key for this submission/version. Repeating the same request
-    # will reuse the persisted job instead of creating another job.
-    idempotency_key = (
+    requested_checks = (
+        request.requested_checks if request is not None else None
+    )
+
+    base_idempotency_key = (
         f"submission:{submission_id}:version:{version_number}:analysis:v1"
     )
 
+    if requested_checks is None:
+        # Preserve the existing key format for default requests.
+        idempotency_key = base_idempotency_key
+    else:
+        # Canonicalize every supported check so equivalent selections
+        # produce the same key regardless of dictionary contents or order.
+        check_names = (
+            "tone",
+            "messaging",
+            "terminology",
+            "factual_claim",
+        )
+        checks_key = ",".join(
+            f"{check}={str(requested_checks.get(check, False)).lower()}"
+            for check in check_names
+        )
+        idempotency_key = f"{base_idempotency_key}:checks:{checks_key}"
     service = SubmissionAnalysisService(
         db,
         CeleryAnalysisJobQueue(),
@@ -170,12 +189,18 @@ def queue_submission_analysis(
             organization_id=actor.organization.id,
             submission_id=submission_id,
             version_number=version_number,
+            requested_checks=requested_checks,
             idempotency_key=idempotency_key,
         )
     except LookupError as exc:
         raise HTTPException(
             status_code=404,
             detail="Submission or requested version not found.",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
         ) from exc
     except ValueError as exc:
         raise HTTPException(

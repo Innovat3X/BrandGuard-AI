@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
+from app.analysis.pipeline import run_analysis
 
 import pytest
 
@@ -199,3 +200,90 @@ def test_claim_extractor_can_report_completed_empty_result():
     call_kwargs = analysis_runner.call_args.kwargs
 
     assert call_kwargs["claims"] == []
+def test_requested_checks_skip_disabled_checks():
+    context = make_context()
+    context.requested_checks = {
+        "tone": False,
+        "messaging": False,
+        "terminology": False,
+        "factual_claim": True,
+    }
+
+    knowledge = make_knowledge()
+    loader = Mock()
+    loader.load.return_value = knowledge
+
+    rule_mapper = Mock(return_value=[])
+    fact_mapper = Mock(return_value=[])
+    claim_extractor = Mock(return_value=[])
+
+    analysis_runner = Mock(return_value="analysis-result")
+    ai_provider = Mock()
+
+    pipeline = DatabaseAnalysisPipeline(
+        knowledge_loader=loader,
+        analysis_runner=analysis_runner,
+        rule_mapper=rule_mapper,
+        fact_mapper=fact_mapper,
+        claim_extractor=claim_extractor,
+        ai_analysis_provider=ai_provider,
+    )
+
+    result = pipeline.analyze(context)
+
+    assert result == "analysis-result"
+
+    # Disabled terminology must not invoke its mapper.
+    rule_mapper.assert_not_called()
+
+    # The requested factual-claim check must run its required inputs.
+    fact_mapper.assert_called_once_with(knowledge.fact_versions)
+    claim_extractor.assert_called_once_with(context.content_text)
+
+    call_kwargs = analysis_runner.call_args.kwargs
+
+    assert call_kwargs["terminology_rules"] is None
+    assert call_kwargs["claims"] == []
+    assert call_kwargs["approved_facts"] == []
+    assert call_kwargs["requested_checks"]["factual_claim"] is True
+    assert call_kwargs["requested_checks"]["terminology"] is False
+
+    # Neither AI check was requested.
+    ai_provider.analyze.assert_not_called()
+
+
+def test_requested_ai_check_without_provider_is_unavailable():
+    context = make_context()
+    context.requested_checks = {
+        "tone": True,
+        "messaging": False,
+        "terminology": False,
+        "factual_claim": False,
+    }
+
+    loader = Mock()
+    loader.load.return_value = make_knowledge()
+
+    pipeline = DatabaseAnalysisPipeline(
+        knowledge_loader=loader,
+        analysis_runner=run_analysis,
+    )
+
+    result = pipeline.analyze(context)
+
+    assert result.status == "partial"
+
+    unavailable = [
+        finding
+        for finding in result.findings
+        if finding.result.value == "check_unavailable"
+    ]
+
+    assert len(unavailable) == 1
+    assert unavailable[0].category.value == "tone"
+
+    # A disabled AI category must not be reported as unavailable.
+    assert all(
+        finding.category.value != "messaging"
+        for finding in result.findings
+    )

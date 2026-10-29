@@ -173,6 +173,27 @@ A newly created submission starts in submitted status.
 
 ### POST /api/v1/submissions/{submission_id}/analysis
 
+
+Request body (optional):
+
+{
+  "version_number": 1,
+  "requested_checks": {
+    "tone": true,
+    "terminology": true,
+    "factual_claim": true
+  }
+}
+
+`requested_checks` specifies which supported analysis checks
+should run. Each key identifies a check, and its Boolean value
+indicates whether it was requested. If omitted, the backend
+uses its documented default checks.
+
+A check that is not run must not be reported as having passed.
+Unsupported or unavailable checks must be represented honestly
+in the analysis outcome.
+
 Queue analysis of the specified version. The request may contain
 a version number; if omitted, analyse the current version.
 

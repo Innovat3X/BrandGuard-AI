@@ -165,6 +165,7 @@ def run_analysis(
     claims: Sequence[StructuredClaim] | None,
     approved_facts: Sequence[StructuredApprovedFact] = (),
     fact_lookup_completed: bool = False,
+    requested_checks: dict[str, bool] | None = None,
 ) -> AnalysisResponse:
     """
     Run the currently implemented terminology and claim checks.
@@ -181,7 +182,13 @@ def run_analysis(
     findings: list[Finding] = []
 
     # 1. Terminology check
-    if not terminology_rules:
+    if (
+        requested_checks is not None
+        and requested_checks.get("terminology") is not True
+    ):
+        # This check was not requested; don't report it as unavailable.
+        pass
+    elif not terminology_rules:
         findings.append(
             _unavailable_finding(
                 category=FindingCategory.TERMINOLOGY,
@@ -196,9 +203,15 @@ def run_analysis(
         findings.extend(
             check_terminology(content_text, terminology_rules)
         )
+       # 2. Claim extraction and approved-fact comparison
+    if (
+        requested_checks is not None
+        and requested_checks.get("factual_claim") is not True
+    ):
+        # This check was not requested; don't report it as unavailable.
+        pass
 
-    # 2. Claim extraction and approved-fact comparison
-    if claims is None:
+    elif claims is None:
         findings.append(
             _unavailable_finding(
                 category=FindingCategory.FACTUAL_CLAIM,
@@ -209,6 +222,7 @@ def run_analysis(
                 source_name="Claim extraction",
             )
         )
+
     elif claims:
         # Claim locations must refer to the exact content being analysed.
         matching_claims = [
@@ -217,9 +231,7 @@ def run_analysis(
             if claim.source_text == content_text
         ]
 
-        has_mismatched_source = (
-            len(matching_claims) != len(claims)
-        )
+        has_mismatched_source = len(matching_claims) != len(claims)
 
         if has_mismatched_source:
             findings.append(
