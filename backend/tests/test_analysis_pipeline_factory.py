@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+from app.analysis.claim_extraction import extract_structured_claims
 from app.services.analysis_knowledge_mappers import (
     map_approved_facts,
     map_approved_terminology_rules,
@@ -11,7 +12,7 @@ from app.services.analysis_pipeline_factory import (
 )
 
 
-def test_factory_wires_loader_mappers_and_runner():
+def test_factory_wires_loader_mappers_runner_and_custom_extractor():
     session = object()
     analysis_runner = object()
     claim_extractor = object()
@@ -80,7 +81,7 @@ def test_factory_forwards_custom_limits():
     )
 
 
-def test_factory_allows_claim_extractor_to_be_unavailable():
+def test_factory_uses_default_claim_extractor():
     session = object()
     analysis_runner = object()
 
@@ -99,12 +100,10 @@ def test_factory_allows_claim_extractor_to_be_unavailable():
             analysis_runner=analysis_runner,
         )
 
-    loader_instance = loader_class.return_value
-
     pipeline_class.assert_called_once_with(
-        knowledge_loader=loader_instance,
+        knowledge_loader=loader_class.return_value,
         analysis_runner=analysis_runner,
         rule_mapper=map_approved_terminology_rules,
         fact_mapper=map_approved_facts,
-        claim_extractor=None,
+        claim_extractor=extract_structured_claims,
     )

@@ -1,5 +1,8 @@
+"""Persistence operations for versioned brand facts."""
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -10,6 +13,15 @@ from app.infrastructure.db.brand_fact_version import BrandFactVersion
 
 
 FACT_VERSION_STATUSES = {"draft", "approved", "archived"}
+
+STRUCTURED_FACT_SPECS: dict[str, tuple[str, set[str]]] = {
+    "product_price": ("currency", {"INR", "USD", "EUR", "GBP"}),
+    "discount_percentage": ("percentage", {"%"}),
+    "warranty_duration": ("duration", {"year", "years", "month", "months"}),
+    "battery_life_duration": ("duration", {"hour", "hours", "day", "days"}),
+    "product_weight": ("quantity", {"mg", "g", "kg", "lb"}),
+    "product_capacity": ("quantity", {"ml", "l"}),
+}
 
 
 class BrandFactRepository:
@@ -31,9 +43,15 @@ class BrandFactRepository:
         source_url: str | None = None,
         effective_from: datetime | None = None,
         expires_at: datetime | None = None,
+        fact_key: str | None = None,
+        structured_value: dict[str, Any] | None = None,
     ) -> tuple[BrandFact, BrandFactVersion]:
-        """Create a fact and its first draft version in one transaction."""
-        self._validate_version_fields(fact_text)
+        """Create a fact and its first draft version."""
+        self._validate_version_fields(
+            fact_text,
+            fact_key,
+            structured_value,
+        )
 
         if not label.strip():
             raise ValueError("Fact label must not be empty.")
@@ -54,6 +72,8 @@ class BrandFactRepository:
             version_number=1,
             fact_text=fact_text,
             source_url=source_url,
+            fact_key=fact_key,
+            structured_value=structured_value,
             status="draft",
             effective_from=effective_from,
             expires_at=expires_at,
@@ -104,10 +124,7 @@ class BrandFactRepository:
         statement = (
             select(BrandFact)
             .where(BrandFact.organization_id == organization_id)
-            .order_by(
-                BrandFact.created_at.desc(),
-                BrandFact.id,
-            )
+            .order_by(BrandFact.created_at.desc(), BrandFact.id)
             .limit(limit)
         )
 
@@ -141,12 +158,7 @@ class BrandFactRepository:
         organization_id: UUID,
         limit: int = 100,
     ) -> list[BrandFactVersion]:
-        """List approved fact versions, including their historical versions.
-
-        Use list_active_fact_versions() when retrieving facts for
-        current analysis. This method deliberately does not apply
-        effective-date or expiry filtering.
-        """
+        """List approved fact versions, including historical versions."""
         if limit < 1:
             raise ValueError("Limit must be at least 1.")
 
@@ -171,19 +183,7 @@ class BrandFactRepository:
         as_of: datetime | None = None,
         limit: int = 100,
     ) -> list[BrandFactVersion]:
-        """Return the latest applicable approved version of each fact.
-
-        Draft and archived versions are excluded. A version is applicable
-        when effective_from is absent or has passed, and expires_at is
-        absent or is still in the future.
-
-        When multiple eligible approved versions exist for a fact, the
-        highest eligible version number is returned. Historical versions
-        remain unchanged.
-
-        The application service remains responsible for any additional
-        evidence-quality or domain-specific claim verification rules.
-        """
+        """Return the latest applicable approved version of each fact."""
         if limit < 1:
             raise ValueError("Limit must be at least 1.")
 
@@ -245,9 +245,15 @@ class BrandFactRepository:
         source_url: str | None = None,
         effective_from: datetime | None = None,
         expires_at: datetime | None = None,
+        fact_key: str | None = None,
+        structured_value: dict[str, Any] | None = None,
     ) -> BrandFactVersion:
         """Append a draft version without overwriting fact history."""
-        self._validate_version_fields(fact_text)
+        self._validate_version_fields(
+            fact_text,
+            fact_key,
+            structured_value,
+        )
         self._validate_dates(effective_from, expires_at)
 
         fact = self._session.scalar(
@@ -271,9 +277,7 @@ class BrandFactRepository:
             )
         )
 
-        next_version = (
-            1 if latest_version is None else latest_version + 1
-        )
+        next_version = 1 if latest_version is None else latest_version + 1
 
         version = BrandFactVersion(
             organization_id=organization_id,
@@ -281,6 +285,8 @@ class BrandFactRepository:
             version_number=next_version,
             fact_text=fact_text,
             source_url=source_url,
+            fact_key=fact_key,
+            structured_value=structured_value,
             status="draft",
             effective_from=effective_from,
             expires_at=expires_at,
@@ -298,12 +304,7 @@ class BrandFactRepository:
         version_number: int,
         approved_by: UUID,
     ) -> BrandFactVersion:
-        """Approve a draft version and record its approval metadata.
-
-        Authorization must be checked by the application service.
-        Re-approving an already approved version preserves its original
-        approval timestamp and approver.
-        """
+        """Approve a draft version and record approval metadata."""
         version = self._session.scalar(
             select(BrandFactVersion)
             .where(
@@ -323,9 +324,7 @@ class BrandFactRepository:
             return version
 
         if version.status != "draft":
-            raise ValueError(
-                "Only a draft fact version can be approved."
-            )
+            raise ValueError("Only a draft fact version can be approved.")
 
         version.status = "approved"
         version.approved_by = approved_by
@@ -335,38 +334,83 @@ class BrandFactRepository:
         return version
 
     @staticmethod
-    def _validate_version_fields(fact_text: str) -> None:
+    def _validate_version_fields(
+        fact_text: str,
+        fact_key: str | None = None,
+        structured_value: dict[str, Any] | None = None,
+    ) -> None:
         if not fact_text.strip():
             raise ValueError("Fact text must not be empty.")
+
+        if (fact_key is None) != (structured_value is None):
+            raise ValueError(
+                "fact_key and structured_value must be provided together."
+            )
+
+        if fact_key is None:
+            return
+
+        if fact_key not in STRUCTURED_FACT_SPECS:
+            raise ValueError(f"Unsupported structured fact key: {fact_key}")
+
+        if not isinstance(structured_value, dict):
+            raise ValueError("structured_value must be a JSON object.")
+
+        if not all(
+            key in structured_value
+            for key in ("kind", "value", "unit")
+        ):
+            raise ValueError(
+                "structured_value must contain kind, value and unit."
+            )
+
+        expected_kind, allowed_units = STRUCTURED_FACT_SPECS[fact_key]
+
+        if structured_value["kind"] != expected_kind:
+            raise ValueError(
+                f"{fact_key} requires kind '{expected_kind}'."
+            )
+
+        unit = structured_value["unit"]
+        if not isinstance(unit, str) or unit not in allowed_units:
+            raise ValueError(
+                f"{fact_key} requires one of these units: "
+                f"{', '.join(sorted(allowed_units))}."
+            )
+
+        raw_value = structured_value["value"]
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise ValueError("structured_value.value must be a decimal string.")
+
+        try:
+            numeric_value = Decimal(raw_value)
+        except (InvalidOperation, ValueError):
+            raise ValueError(
+                "structured_value.value must be a valid decimal string."
+            ) from None
+
+        if not numeric_value.is_finite() or numeric_value < 0:
+            raise ValueError(
+                "structured_value.value must be a finite non-negative number."
+            )
 
     @staticmethod
     def _validate_dates(
         effective_from: datetime | None,
         expires_at: datetime | None,
     ) -> None:
-        if (
-            effective_from is not None
-            and (
-                effective_from.tzinfo is None
-                or effective_from.utcoffset() is None
-            )
+        for field_name, value in (
+            ("effective_from", effective_from),
+            ("expires_at", expires_at),
         ):
-            raise ValueError("effective_from must be timezone-aware.")
-
-        if (
-            expires_at is not None
-            and (
-                expires_at.tzinfo is None
-                or expires_at.utcoffset() is None
-            )
-        ):
-            raise ValueError("expires_at must be timezone-aware.")
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError(f"{field_name} must be timezone-aware.")
 
         if (
             effective_from is not None
             and expires_at is not None
             and expires_at <= effective_from
         ):
-            raise ValueError(
-                "expires_at must be later than effective_from."
-            )
+            raise ValueError("expires_at must be later than effective_from.")
