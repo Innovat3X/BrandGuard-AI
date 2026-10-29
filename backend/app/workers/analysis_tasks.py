@@ -1,3 +1,4 @@
+
 """Celery tasks for BrandGuard AI analysis jobs."""
 
 from uuid import UUID
@@ -24,7 +25,6 @@ class CeleryAnalysisJobQueue:
         PostgreSQL remains the source of truth for job state.
         Queue messages contain only the job identifier.
         """
-
         celery_app.send_task(
             ANALYSIS_TASK_NAME,
             args=[str(job_id)],
@@ -43,11 +43,15 @@ def process_analysis_job(job_id: str) -> dict[str, str]:
     retries, and finalisation. An unclaimed duplicate is returned
     without performing analysis again.
 
-    Claim extraction is intentionally not configured until a real
-    extractor is available. The analysis pipeline must represent
-    unavailable checks as unavailable, not as passing.
-    """
+    The worker factory configures the OpenAI claim extractor when
+    OPENAI_API_KEY is available. Without the key, claim extraction
+    remains unavailable. Unavailable checks must never be reported
+    as passing.
 
+    Claim extraction does not establish factual truth. End-to-end
+    factual verification remains incomplete until approved database
+    facts can be mapped to structured comparison values.
+    """
     parsed_job_id = UUID(job_id)
     session_factory = get_session_factory()
 
@@ -73,6 +77,7 @@ def process_analysis_job(job_id: str) -> dict[str, str]:
             "status": str(result_status),
         }
 
+
 @celery_app.task(name=RECOVERY_TASK_NAME)
 def recover_stale_analysis_jobs() -> dict[str, int]:
     """Recover stale processing jobs and queued jobs without a live lease.
@@ -80,8 +85,8 @@ def recover_stale_analysis_jobs() -> dict[str, int]:
     This task is triggered periodically by Celery Beat. Recovery state changes
     and dispatch leases are guarded by conditional repository operations.
     """
-
     session_factory = get_session_factory()
+
     with session_factory() as session:
         recovery = AnalysisRecoveryService(
             session=session,

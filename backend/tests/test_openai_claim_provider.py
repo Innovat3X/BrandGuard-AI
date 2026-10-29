@@ -100,6 +100,7 @@ def test_built_extractor_validates_provider_output(monkeypatch):
 
     text = "Our product improves efficiency by 40%."
     start = text.index("40%")
+
     payload = {
         "claims": [
             {

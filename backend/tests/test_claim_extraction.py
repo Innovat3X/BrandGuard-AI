@@ -52,7 +52,13 @@ def test_empty_list_means_extraction_completed_without_claims():
 
 
 def test_none_means_extraction_is_unavailable():
-    assert validate_claim_payload("Efficiency improves by 40%.", None) is None
+    assert (
+        validate_claim_payload(
+            "Efficiency improves by 40%.",
+            None,
+        )
+        is None
+    )
 
 
 def test_incorrect_source_offsets_are_rejected():

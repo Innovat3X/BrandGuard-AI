@@ -101,3 +101,75 @@ def test_factory_rejects_invalid_attempt_limit(max_attempts):
             object(),
             max_attempts=max_attempts,
         )
+
+def test_factory_uses_openai_extractor_when_api_key_is_configured(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    session = object()
+    queue = object()
+    openai_extractor = object()
+
+    with (
+        patch(
+            "app.analysis.openai_claim_provider.build_openai_claim_extractor",
+            return_value=openai_extractor,
+        ) as extractor_builder,
+        patch(
+            "app.services.analysis_worker_factory."
+            "DatabaseSubmissionVersionLoader"
+        ),
+        patch(
+            "app.services.analysis_worker_factory."
+            "build_database_analysis_pipeline"
+        ) as pipeline_builder,
+        patch(
+            "app.services.analysis_worker_factory.AnalysisWorkerService"
+        ),
+    ):
+        build_analysis_worker_service(session, queue)
+
+    extractor_builder.assert_called_once_with()
+    pipeline_builder.assert_called_once_with(
+        session,
+        claim_extractor=openai_extractor,
+    )
+
+
+def test_explicit_extractor_takes_precedence_over_openai_configuration(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    session = object()
+    queue = object()
+    explicit_extractor = object()
+
+    with (
+        patch(
+            "app.analysis.openai_claim_provider.build_openai_claim_extractor",
+        ) as extractor_builder,
+        patch(
+            "app.services.analysis_worker_factory."
+            "DatabaseSubmissionVersionLoader"
+        ),
+        patch(
+            "app.services.analysis_worker_factory."
+            "build_database_analysis_pipeline"
+        ) as pipeline_builder,
+        patch(
+            "app.services.analysis_worker_factory.AnalysisWorkerService"
+        ),
+    ):
+        build_analysis_worker_service(
+            session,
+            queue,
+            claim_extractor=explicit_extractor,
+        )
+
+    extractor_builder.assert_not_called()
+    pipeline_builder.assert_called_once_with(
+        session,
+        claim_extractor=explicit_extractor,
+    )

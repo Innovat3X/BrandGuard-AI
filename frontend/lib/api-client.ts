@@ -1,7 +1,10 @@
 // frontend/lib/api-client.ts
 
+// In production, an unset API base URL means same-origin routing through
+// Vercel Services (/api/* -> FastAPI). Locally, keep the existing API default.
 const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000")
 ).replace(/\/+$/, "");
 
 const ACCESS_TOKEN_KEY = "brandguard_access_token";

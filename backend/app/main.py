@@ -1,4 +1,5 @@
-﻿from uuid import uuid4
+import os
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -11,9 +12,18 @@ app = FastAPI(
     title="BrandGuard AI API",
     version="1.0.0",
 )
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
