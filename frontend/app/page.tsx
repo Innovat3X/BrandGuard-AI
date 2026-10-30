@@ -20,6 +20,48 @@ type Status =
   | "Processing"
   | "Submitted"
   | "Draft";
+
+
+
+
+type CampaignPurpose =
+  | "general_marketing"
+  | "social_media"
+  | "influencer_promotion"
+  | "newsletter"
+  | "sponsorship_event";
+
+type RequestedCheck =
+  | "tone"
+  | "terminology"
+  | "messaging"
+  | "factual_claim"
+  | "visual"
+  | "accessibility";
+
+const campaignPurposeOptions: {
+  value: CampaignPurpose;
+  label: string;
+}[] = [
+  { value: "general_marketing", label: "General marketing" },
+  { value: "social_media", label: "Social media" },
+  { value: "influencer_promotion", label: "Influencer promotion" },
+  { value: "newsletter", label: "Newsletter" },
+  { value: "sponsorship_event", label: "Sponsorship / Event" },
+];
+
+const requestedCheckOptions: {
+  value: RequestedCheck;
+  label: string;
+}[] = [
+  { value: "tone", label: "Brand tone" },
+  { value: "terminology", label: "Terminology" },
+  { value: "messaging", label: "Messaging" },
+  { value: "factual_claim", label: "Factual claims" },
+  { value: "visual", label: "Visual consistency" },
+  { value: "accessibility", label: "Accessibility" },
+];
+
 type Submission = {
   id: string;
   title: string;
@@ -213,6 +255,24 @@ export default function Home() {
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
   const [draftText, setDraftText] = useState("");
+  const [campaignPurpose, setCampaignPurpose] =
+  useState<CampaignPurpose>("general_marketing");
+
+const [requestedChecks, setRequestedChecks] =
+  useState<RequestedCheck[]>([
+    "tone",
+    "terminology",
+    "messaging",
+    "factual_claim",
+  ]);
+
+function toggleRequestedCheck(check: RequestedCheck) {
+  setRequestedChecks((current) =>
+    current.includes(check)
+      ? current.filter((item) => item !== check)
+      : [...current, check]
+  );
+}
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 const [fileInputKey, setFileInputKey] = useState(0);
 const [isSubmitting, setIsSubmitting] = useState(false);
@@ -1084,6 +1144,56 @@ const fileName = selectedFile?.name ?? "";
               </div>
 
               <div>
+                <div>
+  <label
+    htmlFor="campaign-purpose"
+    className="mb-2 block text-sm font-medium text-slate-700"
+  >
+    Campaign purpose
+  </label>
+
+  <select
+    id="campaign-purpose"
+    value={campaignPurpose}
+    onChange={(event) =>
+      setCampaignPurpose(event.target.value as CampaignPurpose)
+    }
+    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+  >
+    {campaignPurposeOptions.map((option) => (
+      <option key={option.value} value={option.value}>
+        {option.label}
+      </option>
+    ))}
+  </select>
+</div>
+
+<div>
+  <p className="mb-2 text-sm font-medium text-slate-700">
+    Requested brand checks
+  </p>
+
+  <div className="grid gap-3 sm:grid-cols-2">
+    {requestedCheckOptions.map((check) => (
+      <label
+        key={check.value}
+        className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 p-3 text-sm text-slate-700 hover:bg-violet-50"
+      >
+        <input
+          type="checkbox"
+          checked={requestedChecks.includes(check.value)}
+          onChange={() => toggleRequestedCheck(check.value)}
+          className="h-4 w-4 accent-violet-600"
+        />
+        {check.label}
+      </label>
+    ))}
+  </div>
+
+  <p className="mt-2 text-xs text-slate-500">
+    Select the brand checks relevant to your content.
+  </p>
+</div>
                 <label
                   htmlFor="submission-content"
                   className="mb-2 block text-sm font-medium text-slate-700"
@@ -1112,9 +1222,38 @@ const fileName = selectedFile?.name ?? "";
                   id="submission-file"
                   type="file"
                   accept=".txt,.pdf,.docx,.png,.jpg,.jpeg"
-                  onChange={(event) =>
-                    setSelectedFile(event.target.files?.[0] ?? null)
-                  }
+                  onChange={(event) => {
+  const file = event.target.files?.[0] ?? null;
+
+  setFormError("");
+
+  if (!file) {
+    setSelectedFile(null);
+    return;
+  }
+
+  const extension = file.name.split(".").pop()?.toLowerCase();
+
+  const allowedExtensions = [
+    "txt",
+    "pdf",
+    "docx",
+    "png",
+    "jpg",
+    "jpeg",
+  ];
+
+  if (!extension || !allowedExtensions.includes(extension)) {
+    setSelectedFile(null);
+    setFileInputKey((key) => key + 1);
+    setFormError(
+      "Unsupported file format. Please select TXT, PDF, DOCX, PNG, JPG or JPEG."
+    );
+    return;
+  }
+
+  setSelectedFile(file);
+}}
                   className="block w-full rounded-lg border border-slate-200 p-2 text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-violet-50 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-violet-700"
                 />
                 <p className="mt-1 text-xs leading-5 text-slate-500">
@@ -1129,7 +1268,7 @@ const fileName = selectedFile?.name ?? "";
               </div>
 
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
-                This form is prepared for FastAPI submission. Live submissions require an authenticated session and registered backend endpoints.
+                Only the title and selected content source are sent to the current API. Campaign purpose and requested checks are prototype selections and are not yet included in the backend contract.
               </div>
               {formError && (
   <p
