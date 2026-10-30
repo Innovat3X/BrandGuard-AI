@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.auth import me_router, router as auth_router
 from app.api.v1.brand_facts import router as brand_facts_router
+from app.api.v1.brand_rules import router as brand_rules_router
 from app.api.v1.submissions import router as submissions_router
 
 app = FastAPI(
@@ -36,6 +37,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(me_router, prefix="/api/v1")
 app.include_router(submissions_router, prefix="/api/v1")
 app.include_router(brand_facts_router, prefix="/api/v1")
+app.include_router(brand_rules_router, prefix="/api/v1")
 
 
 @app.exception_handler(HTTPException)

@@ -79,33 +79,51 @@ Initial role values:
 
 ### GET /api/v1/brand/rules
 
-Return brand rules visible to the authenticated organisation.
-Support filtering by status when implemented.
+Return rules and their complete version history for the authenticated
+organisation. The response contains an `items` array. Each rule has an
+id, title, creation timestamp and ordered `versions` array. Each version
+contains its category, description, rule text, severity, status,
+effective timestamp and approval metadata.
 
 ### POST /api/v1/brand/rules
 
-Create a draft brand rule.
+Create a draft rule. Only administrators and creators may create rules.
 
 Request:
+```json
 {
   "title": "Approved terminology",
   "category": "terminology",
   "description": "Terminology requirement",
-  "rule_text": "Use the approved product name",
+  "rule_text": "forbidden_term: cheap",
   "severity": "medium"
 }
+```
+
+Allowed categories: `tone`, `terminology`, `messaging`, `other`.
+Allowed severities: `info`, `low`, `medium`, `high`.
 
 ### PUT /api/v1/brand/rules/{rule_id}
 
-Update a draft rule. Do not silently modify historical approved
-rule versions. Changes to an approved rule must preserve the
-previous approved version.
+Update the latest draft version. Approved and archived versions cannot
+be overwritten. A rule without a latest draft must first receive a new
+draft version. Only administrators and creators may update rules.
+
+### POST /api/v1/brand/rules/{rule_id}/versions
+
+Append a new draft version. The request contains `category`,
+`description`, `rule_text`, `severity`, and optional timezone-aware
+`effective_from`. Existing versions remain unchanged. A new version
+cannot be appended while an earlier draft is still pending.
 
 ### POST /api/v1/brand/rules/{rule_id}/approve
 
-Approve the applicable draft version. Only an authorised
-organisation administrator or reviewer with the required
-permission may approve it.
+Approve the latest draft version and record the reviewer and approval
+timestamp. Only administrators and reviewers may approve a rule.
+
+All rule reads and writes are scoped to the authenticated organisation.
+The frontend must treat the API as authoritative for permissions and
+approval status.
 
 ## 6. Approved facts
 
