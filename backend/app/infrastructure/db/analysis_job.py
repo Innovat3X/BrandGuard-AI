@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -89,6 +90,13 @@ class AnalysisJob(Base):
     ] = mapped_column(
         JSONB,
         nullable=True,
+    )
+
+    check_outcomes: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
     )
 
     attempts: Mapped[int] = mapped_column(

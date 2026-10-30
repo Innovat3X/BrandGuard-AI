@@ -64,6 +64,50 @@ REQUIRED_FINDING_FIELDS = {
 }
 
 
+CHECK_OUTCOME_FIELDS = {
+    "category",
+    "status",
+    "message",
+    "detection_method",
+    "assessed_count",
+    "scope",
+}
+
+REQUIRED_CHECK_OUTCOME_FIELDS = {
+    "category",
+    "status",
+    "message",
+}
+
+CHECK_OUTCOME_CATEGORIES = {
+    "tone",
+    "terminology",
+    "messaging",
+    "factual_claim",
+    "visual",
+    "accessibility",
+    "other",
+}
+
+CHECK_OUTCOME_STATUSES = {
+    "supported",
+    "issues_found",
+    "inconclusive",
+    "check_unavailable",
+    "disabled",
+    "not_assessed",
+    "coverage_limited",
+}
+
+CHECK_OUTCOME_DETECTION_METHODS = {
+    None,
+    "deterministic",
+    "ai_assisted",
+    "ocr",
+    "visual_check",
+}
+
+
 class AnalysisJobRepository:
     """Persistence operations for analysis jobs and their findings.
 
@@ -635,6 +679,7 @@ class AnalysisJobRepository:
         claimed_attempt: int,
         findings: Sequence[Mapping[str, Any]],
         final_status: str,
+        check_outcomes: Sequence[Mapping[str, Any]] = (),
         error_code: str | None = None,
         error_message: str | None = None,
         submission_status: str | None = None,
@@ -689,6 +734,70 @@ class AnalysisJobRepository:
                 )
 
             prepared_findings.append(dict(finding))
+
+        prepared_check_outcomes: list[dict[str, Any]] = []
+
+        for index, outcome in enumerate(check_outcomes):
+            if not isinstance(outcome, Mapping):
+                raise ValueError(
+                    f"Check outcome at index {index} must be a mapping."
+                )
+
+            unknown_fields = set(outcome) - CHECK_OUTCOME_FIELDS
+            if unknown_fields:
+                raise ValueError(
+                    f"Check outcome at index {index} contains unsupported "
+                    f"fields: {sorted(unknown_fields)}"
+                )
+
+            missing_fields = REQUIRED_CHECK_OUTCOME_FIELDS - set(outcome)
+            if missing_fields:
+                raise ValueError(
+                    f"Check outcome at index {index} is missing required "
+                    f"fields: {sorted(missing_fields)}"
+                )
+
+            if outcome["category"] not in CHECK_OUTCOME_CATEGORIES:
+                raise ValueError(
+                    f"Check outcome at index {index} has an unsupported category."
+                )
+
+            if outcome["status"] not in CHECK_OUTCOME_STATUSES:
+                raise ValueError(
+                    f"Check outcome at index {index} has an unsupported status."
+                )
+
+            if (
+                not isinstance(outcome["message"], str)
+                or not outcome["message"].strip()
+            ):
+                raise ValueError(
+                    f"Check outcome at index {index} must have a non-empty message."
+                )
+
+            detection_method = outcome.get("detection_method")
+            if detection_method not in CHECK_OUTCOME_DETECTION_METHODS:
+                raise ValueError(
+                    f"Check outcome at index {index} has an unsupported detection method."
+                )
+
+            assessed_count = outcome.get("assessed_count", 0)
+            if (
+                not isinstance(assessed_count, int)
+                or isinstance(assessed_count, bool)
+                or assessed_count < 0
+            ):
+                raise ValueError(
+                    f"Check outcome at index {index} has an invalid assessed_count."
+                )
+
+            scope = outcome.get("scope")
+            if scope is not None and not isinstance(scope, str):
+                raise ValueError(
+                    f"Check outcome at index {index} has an invalid scope."
+                )
+
+            prepared_check_outcomes.append(dict(outcome))
 
         job = self._session.scalar(
             select(AnalysisJob)
@@ -771,6 +880,7 @@ class AnalysisJobRepository:
         job.completed_at = func.now()
         job.error_code = error_code
         job.error_message = error_message
+        job.check_outcomes = prepared_check_outcomes
         job.heartbeat_at = None
         job.dispatch_lease_token = None
         job.dispatch_lease_expires_at = None

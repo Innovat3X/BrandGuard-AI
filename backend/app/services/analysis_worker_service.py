@@ -6,7 +6,7 @@ depending on a specific AI provider or analysis implementation.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 import logging
@@ -163,6 +163,7 @@ class AnalysisPipelineResult(Protocol):
     submission_version_id: UUID
     status: str
     findings: Sequence[Any]
+    check_outcomes: Sequence[Any]
 
 
 class AnalysisPipeline(Protocol):
@@ -355,7 +356,27 @@ class AnalysisWorkerService:
                     list(response.findings)
                 )
 
-                # The repository atomically stores findings and finalises the
+                # Older custom pipeline adapters may not expose outcomes.
+                # Treat missing outcomes as an empty list for compatibility.
+                persisted_check_outcomes: list[dict[str, Any]] = []
+
+                for outcome in getattr(response, "check_outcomes", ()):
+                    if hasattr(outcome, "model_dump") and callable(
+                        outcome.model_dump
+                    ):
+                        outcome_data = outcome.model_dump(mode="json")
+                    elif isinstance(outcome, Mapping):
+                        outcome_data = dict(outcome)
+                    else:
+                        raise ValueError(
+                            "Each check outcome must be a mapping or "
+                            "Pydantic model."
+                        )
+
+                    persisted_check_outcomes.append(outcome_data)
+
+                # The repository atomically stores findings, check outcomes,
+                # and finalises the job in the same transaction.
                 # job, updating submission state only if this version is current.
                 finalised = self._jobs.persist_findings_and_finish_job(
                     organization_id=organization_id,
@@ -364,6 +385,7 @@ class AnalysisWorkerService:
                     claimed_attempt=claimed_attempt,
                     findings=persisted_findings,
                     final_status=final_status,
+                    check_outcomes=persisted_check_outcomes,
                     submission_status="under_review",
                 )
 

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.analysis.pipeline import build_analysis_response
 from app.services.database_analysis_pipeline import (
     DatabaseAnalysisPipeline,
 )
@@ -180,6 +181,29 @@ def test_mapper_failure_propagates():
         pipeline.analyze(context)
 
     analysis_runner.assert_not_called()
+
+
+def test_disabled_ai_checks_preserve_completed_deterministic_status():
+    deterministic_result = build_analysis_response(
+        job_id=uuid4(),
+        submission_id=uuid4(),
+        submission_version_id=uuid4(),
+        findings=(),
+        status="completed",
+    )
+
+    result = DatabaseAnalysisPipeline._mark_ai_checks_disabled(
+        deterministic_result
+    )
+
+    assert result.status == "completed"
+    assert {
+        outcome.category.value for outcome in result.check_outcomes
+    } == {"tone", "messaging"}
+    assert all(
+        outcome.status.value == "disabled"
+        for outcome in result.check_outcomes
+    )
 
 
 def test_claim_extractor_can_report_completed_empty_result():

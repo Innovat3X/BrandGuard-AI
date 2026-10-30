@@ -122,6 +122,7 @@ def test_successful_analysis_persists_and_finalises_job(
         claimed_attempt=1,
         findings=[],
         final_status=status,
+        check_outcomes=[],
         submission_status="under_review",
     )
 

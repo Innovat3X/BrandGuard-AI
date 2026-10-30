@@ -2,9 +2,17 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from app.analysis.contracts import Finding
+from app.analysis.contracts import CheckOutcome, Finding
+
+
+AnalysisCheck = Literal[
+    "tone",
+    "messaging",
+    "terminology",
+    "factual_claim",
+]
 
 
 class SubmissionCreatedResponse(BaseModel):
@@ -16,6 +24,19 @@ class SubmissionCreatedResponse(BaseModel):
 
 class QueueAnalysisRequest(BaseModel):
     version_number: int | None = Field(default=None, ge=1)
+
+    requested_checks: dict[AnalysisCheck, bool] | None = None
+
+    @model_validator(mode="after")
+    def require_at_least_one_check(self) -> "QueueAnalysisRequest":
+        if (
+            self.requested_checks is not None
+            and not any(self.requested_checks.values())
+        ):
+            raise ValueError(
+                "At least one analysis check must be selected."
+            )
+        return self
 
 
 class AnalysisAcceptedResponse(BaseModel):
@@ -49,6 +70,7 @@ class AnalysisJobStatusResponse(BaseModel):
     completed_at: datetime | None = None
     error_code: str | None = None
     error_message: str | None = None
+    check_outcomes: list[CheckOutcome] = Field(default_factory=list)
 
 
 class FindingsListResponse(BaseModel):

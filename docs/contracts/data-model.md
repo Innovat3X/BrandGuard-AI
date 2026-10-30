@@ -213,6 +213,7 @@ Enforce `UNIQUE (submission_id, version_number)`. Preserve the original private 
 | `status` | Required job status as defined in Section 4.6 |
 | `idempotency_key` | Required key for safe job creation/retry and duplicate prevention |
 | `requested_checks` | Optional structured list/configuration of requested checks (`JSONB` where appropriate) |
+| `check_outcomes` | Required JSONB array containing the persisted outcome of each analysis check; defaults to an empty array until outcomes are written |
 | `attempts` | Required non-negative retry/attempt count; incremented atomically for each successful claim |
 | `started_at` | Nullable UTC timestamp recording the first-ever processing start; preserved across retries |
 | `completed_at` | Nullable UTC timestamp when the job reaches a terminal completed/partial/failed outcome |
