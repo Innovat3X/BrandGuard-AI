@@ -120,6 +120,18 @@ The frontend API client defaults to `http://localhost:8000`. Configure `NEXT_PUB
 
 Register an account at `/register`, then sign in at `/login`. Submit text through **New analysis**.
 
+### Brand Library management
+
+With the updated Brand Library frontend patch present and the frontend development server running, open:
+
+http://localhost:3000/brand-library
+
+The updated page provides the facts and rules management interface. Use it to create facts and terminology rules, save drafts, create new versions, review version history, and approve drafts with an authorised admin or reviewer account.
+
+If the page still displays **“Reference management not connected yet,”** the browser is showing an older frontend build or the updated frontend patch is not present in the local checkout. Confirm that the Brand Library page and its fact/rule service files are present, then restart the frontend development server.
+
+The local frontend patch does not automatically update the hosted website. To make Brand Library management available on the deployed site, commit and push the updated frontend files to the deployment branch and redeploy the frontend. Ensure `NEXT_PUBLIC_API_BASE_URL` points to the backend that exposes the Brand Facts and Brand Rules APIs.
+
 ## Verification
 
 From the repository root:
