@@ -1,3 +1,4 @@
+
 """Integration tests for the database-backed analysis pipeline."""
 
 from datetime import datetime, timezone
@@ -5,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
+from app.analysis.contracts import CheckOutcomeStatus
 from app.infrastructure.db.analysis_knowledge_loader import (
     ApprovedRuleVersionRecord,
 )
@@ -71,7 +73,28 @@ def test_real_analysis_runner_detects_forbidden_terminology():
     assert result.job_id == context.job_id
     assert result.submission_id == context.submission_id
     assert result.submission_version_id == context.submission_version_id
-    assert result.status == "completed"
+
+    # No structured claims were extracted, and AI is disabled by default.
+    # Therefore this analysis has limited coverage and is partial.
+    assert result.status == "partial"
+
+    assert any(
+        outcome.category.value == "factual_claim"
+        and outcome.status == CheckOutcomeStatus.COVERAGE_LIMITED
+        for outcome in result.check_outcomes
+    )
+
+    assert any(
+        outcome.category.value == "tone"
+        and outcome.status == CheckOutcomeStatus.DISABLED
+        for outcome in result.check_outcomes
+    )
+
+    assert any(
+        outcome.category.value == "messaging"
+        and outcome.status == CheckOutcomeStatus.DISABLED
+        for outcome in result.check_outcomes
+    )
 
     assert len(result.findings) == 1
 

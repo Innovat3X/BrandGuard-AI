@@ -1,3 +1,4 @@
+
 """Conservative mapping of database knowledge into analysis inputs."""
 
 import re
@@ -42,7 +43,6 @@ _RULE_PATTERN = re.compile(
     r"(?:_case_sensitive)?\s*:\s*(.+)$"
 )
 
-# Approved key -> (required kind, supported units)
 _STRUCTURED_FACT_SPECS: dict[str, tuple[str, frozenset[str]]] = {
     "product_price": (
         "currency",
@@ -77,6 +77,48 @@ _CURRENCY_DISPLAY = {
     "GBP": "£",
 }
 
+_QUANTITY_UNIT_ALIASES = {
+    "mg": "mg",
+    "milligram": "mg",
+    "milligrams": "mg",
+    "g": "g",
+    "gram": "g",
+    "grams": "g",
+    "kg": "kg",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "lb": "lb",
+    "lbs": "lb",
+    "pound": "lb",
+    "pounds": "lb",
+    "ml": "ml",
+    "milliliter": "ml",
+    "milliliters": "ml",
+    "millilitre": "ml",
+    "millilitres": "ml",
+    "l": "l",
+    "liter": "l",
+    "liters": "l",
+    "litre": "l",
+    "litres": "l",
+}
+
+# Canonical comparison units:
+# weight: grams (g)
+# capacity: millilitres (ml)
+# 1 lb = 453.59237 g
+_WEIGHT_TO_GRAMS = {
+    "mg": Decimal("0.001"),
+    "g": Decimal("1"),
+    "kg": Decimal("1000"),
+    "lb": Decimal("453.59237"),
+}
+
+_CAPACITY_TO_MILLILITRES = {
+    "ml": Decimal("1"),
+    "l": Decimal("1000"),
+}
+
 
 def _parse_rule_text(
     rule_text: str,
@@ -102,7 +144,6 @@ def _parse_rule_text(
     if rule_type == "required_term":
         if arrow_count:
             return None
-
         return rule_type, payload, None
 
     if rule_type == "preferred_term" and arrow_count != 1:
@@ -164,16 +205,8 @@ def map_approved_terminology_rules(
     return tuple(mapped)
 
 
-def _normalise_decimal(raw_value: Any) -> str | None:
-    """Return a canonical non-negative decimal string."""
-
-    if not isinstance(raw_value, str) or not raw_value.strip():
-        return None
-
-    try:
-        value = Decimal(raw_value.strip())
-    except (InvalidOperation, ValueError):
-        return None
+def _render_decimal(value: Decimal) -> str | None:
+    """Render a finite, non-negative decimal without trailing zeroes."""
 
     if not value.is_finite() or value < 0:
         return None
@@ -186,12 +219,30 @@ def _normalise_decimal(raw_value: Any) -> str | None:
     return rendered or "0"
 
 
+def _normalise_decimal(raw_value: Any) -> str | None:
+    """Return a canonical non-negative decimal string."""
+
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return None
+
+    try:
+        value = Decimal(raw_value.strip())
+    except (InvalidOperation, ValueError):
+        return None
+
+    return _render_decimal(value)
+
+
 def _canonical_structured_value(
     *,
     fact_key: str,
     structured_value: dict[str, Any],
 ) -> tuple[str, str] | None:
-    """Validate a fact's structured value and return display/comparison values."""
+    """Validate a fact and return its display and comparison values.
+
+    Display values retain the approved quantity's unit. Weight comparison
+    values use grams; capacity comparison values use millilitres.
+    """
 
     spec = _STRUCTURED_FACT_SPECS.get(fact_key)
 
@@ -216,6 +267,8 @@ def _canonical_structured_value(
         unit = unit.upper()
     elif kind == "percentage":
         unit = "%"
+    elif kind == "quantity":
+        unit = _QUANTITY_UNIT_ALIASES.get(unit.casefold(), "")
     else:
         unit = unit.casefold()
 
@@ -228,9 +281,7 @@ def _canonical_structured_value(
         return None
 
     if kind == "currency":
-        comparison_value = f"{unit} {number}"
-        display_value = f"{_CURRENCY_DISPLAY[unit]}{number}"
-        return display_value, comparison_value
+        return f"{_CURRENCY_DISPLAY[unit]}{number}", f"{unit} {number}"
 
     if kind == "percentage":
         return f"{number}%", f"{number} %"
@@ -250,18 +301,35 @@ def _canonical_structured_value(
         }
 
         base_unit = singular_units.get(unit, unit)
-
-        if number == "1":
-            canonical_unit = base_unit
-        else:
-            canonical_unit = plural_units[base_unit]
-
+        canonical_unit = (
+            base_unit if number == "1" else plural_units[base_unit]
+        )
         canonical_value = f"{number} {canonical_unit}"
         return canonical_value, canonical_value
 
-    # Quantity values are compared without unit conversion.
-    canonical_value = f"{number} {unit}"
-    return canonical_value, canonical_value
+    if kind == "quantity":
+        decimal_number = Decimal(number)
+
+        if fact_key == "product_weight":
+            factor = _WEIGHT_TO_GRAMS[unit]
+            canonical_unit = "g"
+        elif fact_key == "product_capacity":
+            factor = _CAPACITY_TO_MILLILITRES[unit]
+            canonical_unit = "ml"
+        else:
+            return None
+
+        converted_number = _render_decimal(decimal_number * factor)
+
+        if converted_number is None:
+            return None
+
+        display_value = f"{number} {unit}"
+        comparison_value = f"{converted_number} {canonical_unit}"
+
+        return display_value, comparison_value
+
+    return None
 
 
 def map_approved_facts(
@@ -270,8 +338,8 @@ def map_approved_facts(
     """Map explicitly structured approved facts into analysis inputs.
 
     Empty records mean retrieval completed and no approved facts exist.
-    Any legacy free-text fact, incomplete structure or invalid value makes
-    the whole mapping unavailable rather than silently ignoring evidence.
+    Legacy free-text facts and invalid structures make the whole mapping
+    unavailable rather than silently ignoring evidence.
     """
 
     if not records:
@@ -280,8 +348,6 @@ def map_approved_facts(
     mapped: list[StructuredApprovedFact] = []
 
     for record in records:
-        # Legacy prose is retained in the database but is never interpreted
-        # as a structured fact without an explicit structured representation.
         if record.fact_key is None or record.structured_value is None:
             return None
 

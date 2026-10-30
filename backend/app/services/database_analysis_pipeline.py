@@ -1,3 +1,4 @@
+
 """Bridge approved database knowledge to the content-analysis pipeline."""
 
 from collections.abc import Callable, Sequence
@@ -7,16 +8,25 @@ from uuid import UUID
 
 from app.analysis.contracts import (
     AnalysisResponse,
+    CheckOutcome,
+    CheckOutcomeStatus,
+    DetectionMethod,
     Finding,
+    FindingCategory,
     FindingResult,
     Severity,
-    build_summary,
 )
 from app.analysis.pipeline import aggregate_findings, build_analysis_response
 from app.infrastructure.db.analysis_knowledge_loader import (
     ApprovedFactVersionRecord,
     ApprovedRuleVersionRecord,
     DatabaseAnalysisKnowledgeLoader,
+)
+
+
+_AI_CATEGORIES = (
+    FindingCategory.TONE,
+    FindingCategory.MESSAGING,
 )
 
 
@@ -145,10 +155,10 @@ class DatabaseAnalysisPipeline:
             fact_lookup_completed=mapped_facts is not None,
         )
 
-        # Keep existing behavior unchanged unless a provider is explicitly
-        # configured and injected by the composition factory.
+        # AI stays disabled unless a provider was explicitly configured
+        # and injected by the composition factory.
         if self._ai_analysis_provider is None:
-            return deterministic_result
+            return self._mark_ai_checks_disabled(deterministic_result)
 
         approved_guidelines = self._build_ai_guidelines(
             knowledge.rule_versions
@@ -159,10 +169,41 @@ class DatabaseAnalysisPipeline:
             approved_guidelines=approved_guidelines,
         )
 
+        # AI-generated corrections remain advisory and require human review.
+        ai_findings = [
+            finding.model_copy(update={"requires_human_review": True})
+            for finding in ai_findings
+        ]
+
         combined_findings = aggregate_findings(
             deterministic_result.findings,
             ai_findings,
         )
+
+        # Keep deterministic outcomes and replace any outcome for categories
+        # now assessed by the configured AI provider.
+        deterministic_outcomes = [
+            outcome
+            for outcome in deterministic_result.check_outcomes
+            if outcome.category not in _AI_CATEGORIES
+        ]
+
+        ai_outcomes = self._build_ai_check_outcomes(
+            ai_findings,
+            guideline_count=len(approved_guidelines),
+        )
+
+        combined_outcomes = [
+            *deterministic_outcomes,
+            *ai_outcomes,
+        ]
+
+        incomplete_outcome_statuses = {
+            CheckOutcomeStatus.CHECK_UNAVAILABLE,
+            CheckOutcomeStatus.COVERAGE_LIMITED,
+            CheckOutcomeStatus.DISABLED,
+            CheckOutcomeStatus.NOT_ASSESSED,
+        }
 
         status = (
             "partial"
@@ -171,6 +212,10 @@ class DatabaseAnalysisPipeline:
                 or any(
                     finding.result == FindingResult.CHECK_UNAVAILABLE
                     for finding in combined_findings
+                )
+                or any(
+                    outcome.status in incomplete_outcome_statuses
+                    for outcome in combined_outcomes
                 )
             )
             else "completed"
@@ -182,7 +227,127 @@ class DatabaseAnalysisPipeline:
             submission_version_id=context.submission_version_id,
             findings=combined_findings,
             status=status,
+            check_outcomes=combined_outcomes,
         )
+
+    @staticmethod
+    def _mark_ai_checks_disabled(
+        result: AnalysisResponse,
+    ) -> AnalysisResponse:
+        """Make disabled AI coverage explicit without creating false findings."""
+
+        # Keep non-contract test doubles and custom runner results unchanged.
+        if not isinstance(result, AnalysisResponse):
+            return result
+
+        # Tone and messaging are AI-only in the current implementation.
+        # Do not retain an outcome that could misleadingly indicate a pass.
+        existing_outcomes = [
+            outcome
+            for outcome in result.check_outcomes
+            if outcome.category not in _AI_CATEGORIES
+        ]
+
+        disabled_outcomes = [
+            CheckOutcome(
+                category=category,
+                status=CheckOutcomeStatus.DISABLED,
+                message=(
+                    f"The {category.value} check is disabled because no "
+                    "AI analysis provider is configured. This category "
+                    "was not assessed."
+                ),
+                detection_method=None,
+                assessed_count=0,
+                scope="optional_ai_brand_analysis",
+            )
+            for category in _AI_CATEGORIES
+        ]
+
+        return build_analysis_response(
+            job_id=result.job_id,
+            submission_id=result.submission_id,
+            submission_version_id=result.submission_version_id,
+            findings=result.findings,
+            status="partial",
+            check_outcomes=[
+                *existing_outcomes,
+                *disabled_outcomes,
+            ],
+        )
+
+    @staticmethod
+    def _build_ai_check_outcomes(
+        ai_findings: Sequence[Finding],
+        *,
+        guideline_count: int,
+    ) -> list[CheckOutcome]:
+        """Summarise AI coverage separately for tone and messaging."""
+
+        outcomes: list[CheckOutcome] = []
+
+        for category in _AI_CATEGORIES:
+            category_findings = [
+                finding
+                for finding in ai_findings
+                if finding.category == category
+            ]
+
+            if any(
+                finding.result == FindingResult.CHECK_UNAVAILABLE
+                for finding in category_findings
+            ):
+                status = CheckOutcomeStatus.CHECK_UNAVAILABLE
+                message = (
+                    f"The AI-assisted {category.value} check could not "
+                    "be completed reliably. Review the related findings."
+                )
+
+            elif any(
+                finding.result == FindingResult.INCONCLUSIVE
+                for finding in category_findings
+            ):
+                status = CheckOutcomeStatus.INCONCLUSIVE
+                message = (
+                    f"The AI-assisted {category.value} check found "
+                    "ambiguous evidence requiring human verification."
+                )
+
+            elif any(
+                finding.result
+                in {
+                    FindingResult.CONFLICT,
+                    FindingResult.UNSUPPORTED,
+                }
+                for finding in category_findings
+            ):
+                status = CheckOutcomeStatus.ISSUES_FOUND
+                message = (
+                    f"The AI-assisted {category.value} check identified "
+                    "one or more potential issues against supplied "
+                    "approved guidelines."
+                )
+
+            else:
+                status = CheckOutcomeStatus.SUPPORTED
+                message = (
+                    f"The AI-assisted {category.value} check reported "
+                    "no issues against the supplied approved guidelines. "
+                    "This is advisory and is not a substitute for human review."
+                )
+
+            outcomes.append(
+                CheckOutcome(
+                    category=category,
+                    status=status,
+                    message=message,
+                    detection_method=DetectionMethod.AI_ASSISTED,
+                    assessed_count=guideline_count,
+                    scope="supplied_approved_guidelines",
+                )
+            )
+
+        return outcomes
 
     @staticmethod
     def _build_ai_guidelines(

@@ -1,3 +1,4 @@
+
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -54,9 +55,27 @@ def analyse(content: str, fact: ApprovedFactVersionRecord):
 @pytest.mark.parametrize(
     ("content", "fact_key", "value", "unit", "kind"),
     [
-        ("The price is ₹1299.", "product_price", "1299", "INR", "currency"),
-        ("Discount 15%.", "discount_percentage", "15", "%", "percentage"),
-        ("Warranty: 2 years.", "warranty_duration", "2", "years", "duration"),
+        (
+            "The price is ₹1299.",
+            "product_price",
+            "1299",
+            "INR",
+            "currency",
+        ),
+        (
+            "Discount 15%.",
+            "discount_percentage",
+            "15",
+            "%",
+            "percentage",
+        ),
+        (
+            "Warranty: 2 years.",
+            "warranty_duration",
+            "2",
+            "years",
+            "duration",
+        ),
         (
             "Battery life: 10 hours.",
             "battery_life_duration",
@@ -64,8 +83,20 @@ def analyse(content: str, fact: ApprovedFactVersionRecord):
             "hours",
             "duration",
         ),
-        ("Weight: 1.5 kg.", "product_weight", "1.5", "kg", "quantity"),
-        ("Capacity: 750 ml.", "product_capacity", "750", "ml", "quantity"),
+        (
+            "Weight: 1.5 kg.",
+            "product_weight",
+            "1.5",
+            "kg",
+            "quantity",
+        ),
+        (
+            "Capacity: 750 ml.",
+            "product_capacity",
+            "750",
+            "ml",
+            "quantity",
+        ),
     ],
 )
 def test_matching_approved_facts_produce_no_findings(
@@ -78,6 +109,34 @@ def test_matching_approved_facts_produce_no_findings(
     fact = make_fact(fact_key, value, unit, kind)
 
     findings = analyse(content, fact)
+
+    assert findings == []
+
+
+def test_equivalent_weight_units_do_not_produce_conflict():
+    # The submitted text uses grams; the approved fact uses kilograms.
+    fact = make_fact(
+        "product_weight",
+        "1",
+        "kg",
+        "quantity",
+    )
+
+    findings = analyse("Weight: 1000 g.", fact)
+
+    assert findings == []
+
+
+def test_equivalent_capacity_units_do_not_produce_conflict():
+    # The submitted text uses millilitres; the approved fact uses litres.
+    fact = make_fact(
+        "product_capacity",
+        "1",
+        "l",
+        "quantity",
+    )
+
+    findings = analyse("Capacity: 1000 ml.", fact)
 
     assert findings == []
 

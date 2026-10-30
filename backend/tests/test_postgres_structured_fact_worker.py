@@ -1,3 +1,4 @@
+
 """PostgreSQL integration test for structured fact verification and retrieval."""
 
 from unittest.mock import Mock, patch
@@ -52,7 +53,6 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
     db_session.add_all([organization, user])
     db_session.flush()
 
-    # Create a real submission and immutable version.
     submissions = SubmissionRepository(db_session)
 
     submission = submissions.create_submission(
@@ -97,7 +97,7 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
         approved_by=user.id,
     )
 
-    # Provide one supported terminology rule so that this check can finish.
+    # Supply one supported terminology rule.
     rules = BrandRuleRepository(db_session)
 
     rule, rule_version = rules.create_rule(
@@ -110,7 +110,7 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
         description="Integration-test terminology rule",
     )
 
-    rule_version = rules.approve_rule_version(
+    rules.approve_rule_version(
         organization_id=organization.id,
         rule_id=rule.id,
         version_number=rule_version.version_number,
@@ -128,8 +128,8 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
 
     queue = Mock()
 
-    # Keep this integration test focused on deterministic analysis.
-    # No external AI service or API key is required.
+    # Keep the test deterministic: no external AI service or API key.
+    # The price claim should still be checked against the approved fact.
     with patch(
         "app.services.analysis_pipeline_factory.get_settings",
         return_value=type(
@@ -145,10 +145,10 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
         result = worker.process_job(job.id)
 
     assert result is not None
-    assert result.status == "completed"
+    assert result.status == "partial"
     assert result.finding_count == 1
 
-    # Reload records to verify the actual persisted database state.
+    # Reload records to verify the persisted database state.
     db_session.expire_all()
 
     saved_job = db_session.scalar(
@@ -159,7 +159,7 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
     )
 
     assert saved_job is not None
-    assert saved_job.status == "completed"
+    assert saved_job.status == "partial"
     assert saved_job.completed_at is not None
 
     saved_findings = list(
@@ -184,7 +184,7 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
     assert saved_finding.requires_human_review is True
     assert saved_finding.suggested_correction == "The price is ₹1299."
 
-    # Exercise the actual findings API against the persisted database row.
+    # Exercise the findings API against the persisted database row.
     actor = AuthenticatedActor(
         user=user,
         organization=organization,
@@ -245,7 +245,7 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
     assert api_finding["detection_method"] == "deterministic"
     assert api_finding["requires_human_review"] is True
 
-    # The worker must leave publication approval to a human reviewer.
+    # Analysis leaves publication approval to a human reviewer.
     saved_submission = db_session.scalar(
         select(Submission).where(
             Submission.organization_id == organization.id,

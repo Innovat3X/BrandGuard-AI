@@ -1,12 +1,13 @@
+
 """Provider-independent brand analysis through an OpenAI-compatible API."""
 
 import json
 from collections.abc import Sequence
+from typing import Literal
 from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
-from typing import Literal
 
 from app.analysis.contracts import (
     DetectionMethod,
@@ -52,8 +53,9 @@ class OpenAICompatibleBrandAnalysisProvider:
     """Analyse tone and messaging against approved brand guidelines.
 
     Provider errors and invalid responses are represented as explicit
-    unavailable findings. This class never treats a failed AI check as
-    a successful check.
+    unavailable findings. Quoted text must uniquely identify a location
+    in the submitted content. AI findings and corrections remain advisory
+    and require human review.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -147,7 +149,9 @@ class OpenAICompatibleBrandAnalysisProvider:
                             "submitted_content": content_text,
                             "approved_guidelines": [
                                 {
-                                    "id": str(guideline.source_rule_version_id),
+                                    "id": str(
+                                        guideline.source_rule_version_id
+                                    ),
                                     "category": guideline.category,
                                     "rule_text": guideline.rule_text,
                                     "severity": guideline.severity.value,
@@ -201,18 +205,10 @@ class OpenAICompatibleBrandAnalysisProvider:
                         "The model cited an unknown guideline version."
                     )
 
-                start = content_text.find(item.quote)
-
-                if start < 0:
-                    raise ValueError(
-                        "The model returned a quote absent from the "
-                        "submitted content."
-                    )
-
-                if item.category not in {"tone", "messaging"}:
-                    raise ValueError(
-                        "The model returned an unsupported category."
-                    )
+                start = self._find_unique_quote(
+                    content_text=content_text,
+                    quote=item.quote,
+                )
 
                 findings.append(
                     Finding(
@@ -257,6 +253,36 @@ class OpenAICompatibleBrandAnalysisProvider:
             )
 
     @staticmethod
+    def _find_unique_quote(
+        *,
+        content_text: str,
+        quote: str,
+    ) -> int:
+        """Return the sole matching offset, rejecting missing or ambiguous text."""
+
+        if not quote:
+            raise ValueError("The model returned an empty quote.")
+
+        first = content_text.find(quote)
+
+        if first < 0:
+            raise ValueError(
+                "The model returned a quote absent from the submitted content."
+            )
+
+        # Search from one character after the first match so overlapping
+        # occurrences are also recognised as ambiguous.
+        second = content_text.find(quote, first + 1)
+
+        if second >= 0:
+            raise ValueError(
+                "The model returned a quote that occurs multiple times "
+                "in the submitted content; its location is ambiguous."
+            )
+
+        return first
+
+    @staticmethod
     def _unavailable_findings(reason: str) -> list[Finding]:
         """Mark both AI check categories unavailable instead of passing."""
 
@@ -277,3 +303,34 @@ class OpenAICompatibleBrandAnalysisProvider:
                 FindingCategory.MESSAGING,
             )
         ]
+
+
+def test_repeated_quote_returns_unavailable_findings():
+    """Ambiguous repeated text must not be assigned an arbitrary offset."""
+
+    content = "Amazing quality. Our product offers amazing quality."
+    quote = "amazing quality"
+    guideline = make_guideline()
+
+    response_data = {
+        "category": "messaging",
+        "severity": "high",
+        "result": "conflict",
+        "explanation": "The messaging may conflict with the approved guideline.",
+        "quote": quote,
+        "approved_rule_id": str(guideline.source_rule_version_id),
+        "suggested_correction": None,
+    }
+
+    with patch(
+        "app.infrastructure.ai.openai_compatible.httpx.post",
+        return_value=make_response([response_data]),
+    ):
+        provider = OpenAICompatibleBrandAnalysisProvider(make_settings())
+        findings = provider.analyze(
+            content_text=content,
+            approved_guidelines=[guideline],
+        )
+
+    # The quote appears more than once, so no guessed location is accepted.
+    assert_unavailable_findings(findings)

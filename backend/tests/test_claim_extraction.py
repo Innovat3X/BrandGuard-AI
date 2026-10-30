@@ -1,4 +1,7 @@
+
 """Tests for deterministic claim extraction."""
+
+import pytest
 
 from app.analysis.claim_extraction import extract_structured_claims
 
@@ -23,7 +26,7 @@ def test_extracts_supported_numeric_claims():
     assert by_key["discount_percentage"].comparison_value == "15 %"
     assert by_key["warranty_duration"].comparison_value == "2 years"
     assert by_key["battery_life_duration"].comparison_value == "10 hours"
-    assert by_key["product_weight"].comparison_value == "1.5 kg"
+    assert by_key["product_weight"].comparison_value == "1500 g"
     assert by_key["product_capacity"].comparison_value == "750 ml"
 
 
@@ -105,3 +108,52 @@ def test_does_not_change_original_submitted_text():
             text[claim.start_offset:claim.end_offset]
             == claim.claimed_value
         )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Weight: 1000 g.", "1000 g"),
+        ("Weight: 1 kg.", "1000 g"),
+        ("Weight: 1000000 mg.", "1000 g"),
+        ("Weight: 1.5 kilograms.", "1500 g"),
+        ("Weight: 1 lb.", "453.59237 g"),
+    ],
+)
+def test_weight_claims_use_canonical_grams(text, expected):
+    claims = extract_structured_claims(text)
+
+    assert len(claims) == 1
+    assert claims[0].fact_key == "product_weight"
+    assert claims[0].comparison_value == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Capacity: 1000 ml.", "1000 ml"),
+        ("Capacity: 1 L.", "1000 ml"),
+        ("Capacity: 1 litre.", "1000 ml"),
+        ("Capacity: 0.75 liters.", "750 ml"),
+    ],
+)
+def test_capacity_claims_use_canonical_millilitres(text, expected):
+    claims = extract_structured_claims(text)
+
+    assert len(claims) == 1
+    assert claims[0].fact_key == "product_capacity"
+    assert claims[0].comparison_value == expected
+
+
+def test_converted_claims_preserve_original_text_and_offsets():
+    text = "The product weight is 1.5 kg."
+
+    claims = extract_structured_claims(text)
+
+    assert len(claims) == 1
+    claim = claims[0]
+
+    assert claim.claimed_value == "1.5 kg"
+    assert claim.comparison_value == "1500 g"
+    assert text[claim.start_offset:claim.end_offset] == "1.5 kg"
+    assert claim.source_text == text

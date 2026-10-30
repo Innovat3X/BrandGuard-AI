@@ -1,6 +1,8 @@
+
 """Tests for conservative database knowledge mapping."""
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -13,7 +15,6 @@ from app.services.analysis_knowledge_mappers import (
     map_approved_facts,
     map_approved_terminology_rules,
 )
-
 
 APPROVED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -166,7 +167,12 @@ def test_legacy_free_text_fact_returns_unavailable():
 
 
 @pytest.mark.parametrize(
-    ("fact_key", "structured_value", "expected_display", "expected_comparison"),
+    (
+        "fact_key",
+        "structured_value",
+        "expected_display",
+        "expected_comparison",
+    ),
     [
         (
             "product_price",
@@ -196,7 +202,7 @@ def test_legacy_free_text_fact_returns_unavailable():
             "product_weight",
             {"kind": "quantity", "value": "1.50", "unit": "kg"},
             "1.5 kg",
-            "1.5 kg",
+            "1500 g",
         ),
         (
             "product_capacity",
@@ -229,6 +235,63 @@ def test_maps_supported_structured_facts(
     assert mapped.comparison_value == expected_comparison
     assert mapped.status == "approved"
     assert mapped.source_url == record.source_url
+
+
+@pytest.mark.parametrize(
+    ("value", "unit", "expected"),
+    [
+        ("1000", "g", "1000 g"),
+        ("1", "kg", "1000 g"),
+        ("1000000", "mg", "1000 g"),
+        ("1", "lb", "453.59237 g"),
+        ("1", "kilograms", "1000 g"),
+    ],
+)
+def test_weight_units_convert_to_canonical_grams(value, unit, expected):
+    record = make_fact(
+        fact_key="product_weight",
+        structured_value={
+            "kind": "quantity",
+            "value": value,
+            "unit": unit,
+        },
+    )
+
+    result = map_approved_facts([record])
+
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].comparison_value == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "unit", "expected"),
+    [
+        ("1000", "ml", "1000 ml"),
+        ("1", "l", "1000 ml"),
+        ("1", "litre", "1000 ml"),
+        ("0.75", "l", "750 ml"),
+    ],
+)
+def test_capacity_units_convert_to_canonical_millilitres(
+    value,
+    unit,
+    expected,
+):
+    record = make_fact(
+        fact_key="product_capacity",
+        structured_value={
+            "kind": "quantity",
+            "value": value,
+            "unit": unit,
+        },
+    )
+
+    result = map_approved_facts([record])
+
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].comparison_value == expected
 
 
 @pytest.mark.parametrize(

@@ -1,3 +1,4 @@
+
 """Integration test for worker execution with the real analysis pipeline."""
 
 from datetime import datetime, timezone
@@ -181,7 +182,7 @@ def test_worker_runs_real_analysis_and_hands_findings_to_persistence(
     assert persisted["job_id"] == job_id
     assert persisted["submission_version_id"] == submission_version_id
     assert persisted["claimed_attempt"] == 1
-    assert persisted["final_status"] == "completed"
+    assert persisted["final_status"] == "partial"
     assert persisted["submission_status"] == "under_review"
 
     findings = persisted["findings"]
@@ -194,8 +195,13 @@ def test_worker_runs_real_analysis_and_hands_findings_to_persistence(
     assert finding["source_rule_version_id"] == rule_version_id
     assert finding["finding_fingerprint"]
 
-    assert job.status == "completed"
+    # WorkerResult exposes the job outcome, not check_outcomes.
+    assert result is not None
+    assert result.status == "partial"
+    assert result.finding_count == 1
+    assert result.attempts == 1
+
+    assert job.status == "partial"
     assert session.commits >= 2
     assert session.rollbacks == 0
     queue.enqueue_analysis.assert_not_called()
-    assert result is not None

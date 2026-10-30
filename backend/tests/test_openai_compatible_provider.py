@@ -350,3 +350,35 @@ def test_http_error_returns_unavailable_findings():
         )
 
     assert_unavailable_findings(findings)
+
+
+def test_repeated_quote_returns_unavailable_findings():
+    """Repeated quoted text must not be assigned an arbitrary offset."""
+
+    content = "Amazing quality. Our product offers Amazing quality."
+    quote = "Amazing quality"
+    guideline = make_guideline()
+
+    response_data = {
+        "category": "messaging",
+        "severity": "high",
+        "result": "conflict",
+        "explanation": (
+            "The messaging may conflict with the approved guideline."
+        ),
+        "quote": quote,
+        "approved_rule_id": str(guideline.source_rule_version_id),
+        "suggested_correction": None,
+    }
+
+    with patch(
+        "app.infrastructure.ai.openai_compatible.httpx.post",
+        return_value=make_response([response_data]),
+    ):
+        provider = OpenAICompatibleBrandAnalysisProvider(make_settings())
+        findings = provider.analyze(
+            content_text=content,
+            approved_guidelines=[guideline],
+        )
+
+    assert_unavailable_findings(findings)

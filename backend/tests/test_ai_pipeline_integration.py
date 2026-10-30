@@ -7,6 +7,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.analysis.contracts import (
+    CheckOutcomeStatus,
     DetectionMethod,
     Evidence,
     Finding,
@@ -169,7 +170,16 @@ def test_ai_and_deterministic_findings_are_combined():
         == messaging_rule.rule_text
     )
 
-    assert result.status == "completed"
+    # Factual claims are only partially covered when extraction returns
+    # no supported structured claims, so the overall result is partial.
+    assert result.status == "partial"
+
+    assert any(
+        outcome.category == FindingCategory.FACTUAL_CLAIM
+        and outcome.status == CheckOutcomeStatus.COVERAGE_LIMITED
+        for outcome in result.check_outcomes
+    )
+
     assert result.submission_version_id == context.submission_version_id
 
     deterministic_findings = [
@@ -204,6 +214,7 @@ def test_ai_and_deterministic_findings_are_combined():
         == messaging_rule.rule_text
     )
     assert combined_ai_finding.location.matched_text == quote
+    assert combined_ai_finding.requires_human_review is True
 
     assert len(result.findings) == 2
     assert result.summary.total == len(result.findings)

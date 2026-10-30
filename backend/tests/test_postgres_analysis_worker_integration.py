@@ -1,7 +1,8 @@
+
 """PostgreSQL integration test for the complete analysis worker flow."""
 
-from uuid import uuid4
 from unittest.mock import Mock
+from uuid import uuid4
 
 from sqlalchemy import func, select
 
@@ -94,8 +95,8 @@ def test_postgres_worker_persists_findings_and_finalises_job(db_session):
 
     queue = Mock()
 
-    # The empty claim list represents a completed extraction that found
-    # no claim candidates. Terminology analysis uses the real pipeline.
+    # No supported structured claims were extracted. The terminology
+    # check still runs, but overall coverage is limited.
     worker = build_analysis_worker_service(
         db_session,
         queue,
@@ -112,7 +113,7 @@ def test_postgres_worker_persists_findings_and_finalises_job(db_session):
     )
 
     assert saved_job is not None
-    assert saved_job.status == "completed"
+    assert saved_job.status == "partial"
     assert saved_job.attempts == 1
     assert saved_job.completed_at is not None
     assert saved_job.error_code is None
@@ -137,7 +138,8 @@ def test_postgres_worker_persists_findings_and_finalises_job(db_session):
     assert finding.finding_fingerprint
     assert finding.requires_human_review is True
 
-    # Analysis moves the current submission into review, not approval.
+    # Partial analysis still sends the submission to human review,
+    # not approval.
     saved_submission = db_session.scalar(
         select(Submission).where(Submission.id == submission.id)
     )
@@ -152,5 +154,7 @@ def test_postgres_worker_persists_findings_and_finalises_job(db_session):
     )
 
     assert finding_count == 1
-    queue.enqueue_analysis.assert_not_called()
+    assert queue.enqueue_analysis.assert_not_called() is None
     assert result is not None
+    assert result.status == "partial"
+    assert result.finding_count == 1

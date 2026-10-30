@@ -1,3 +1,4 @@
+
 from enum import Enum
 from typing import Annotated, Literal, Union
 from uuid import UUID, uuid4
@@ -5,7 +6,6 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 
-# Finding categories allowed by the shared contract.
 class FindingCategory(str, Enum):
     TONE = "tone"
     TERMINOLOGY = "terminology"
@@ -30,6 +30,18 @@ class FindingResult(str, Enum):
     CHECK_UNAVAILABLE = "check_unavailable"
 
 
+class CheckOutcomeStatus(str, Enum):
+    """Status of a check, separate from issue findings."""
+
+    SUPPORTED = "supported"
+    ISSUES_FOUND = "issues_found"
+    INCONCLUSIVE = "inconclusive"
+    CHECK_UNAVAILABLE = "check_unavailable"
+    DISABLED = "disabled"
+    NOT_ASSESSED = "not_assessed"
+    COVERAGE_LIMITED = "coverage_limited"
+
+
 class DetectionMethod(str, Enum):
     DETERMINISTIC = "deterministic"
     AI_ASSISTED = "ai_assisted"
@@ -37,7 +49,6 @@ class DetectionMethod(str, Enum):
     VISUAL_CHECK = "visual_check"
 
 
-# Job lifecycle status and analysis-result status are different.
 class AnalysisJobStatus(str, Enum):
     QUEUED = "queued"
     PROCESSING = "processing"
@@ -68,7 +79,6 @@ class ImageBoundingBoxLocation(BaseModel):
     height: float = Field(ge=0, le=1)
 
 
-# The kind field determines which location structure is used.
 Location = Annotated[
     Union[TextRangeLocation, ImageBoundingBoxLocation],
     Field(discriminator="kind"),
@@ -93,6 +103,17 @@ class Finding(BaseModel):
     requires_human_review: bool = True
 
 
+class CheckOutcome(BaseModel):
+    """Describes what a check assessed without inventing an issue."""
+
+    category: FindingCategory
+    status: CheckOutcomeStatus
+    message: str = Field(min_length=1)
+    detection_method: DetectionMethod | None = None
+    assessed_count: int = Field(default=0, ge=0)
+    scope: str | None = None
+
+
 class AnalysisSummary(BaseModel):
     info: int = Field(default=0, ge=0)
     low: int = Field(default=0, ge=0)
@@ -106,21 +127,22 @@ class AnalysisResponse(BaseModel):
     submission_id: UUID
     submission_version_id: UUID
 
-    # A result is completed or partial.
-    # The worker separately tracks queued, processing and failed.
+    # Job result; lifecycle states are tracked separately by the worker.
     status: Literal["completed", "partial"]
 
+    # Findings represent issues or checks needing attention.
     findings: list[Finding]
+
+    # Outcomes make check coverage and unavailable checks explicit.
+    check_outcomes: list[CheckOutcome] = Field(default_factory=list)
+
     summary: AnalysisSummary
 
 
 def build_summary(findings: list[Finding]) -> AnalysisSummary:
-    """Count findings by severity for the response summary."""
+    """Count issue findings by severity."""
 
-    counts = {
-        severity: 0
-        for severity in Severity
-    }
+    counts = {severity: 0 for severity in Severity}
 
     for finding in findings:
         counts[finding.severity] += 1

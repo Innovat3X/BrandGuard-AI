@@ -1,3 +1,4 @@
+
 """Conservative deterministic extraction of numeric claims."""
 
 import re
@@ -10,6 +11,45 @@ from app.analysis.contracts import Severity
 
 _NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 _CURRENCY = r"(?:INR|Rs\.?|₹|USD|US\$|EUR|€|GBP|£)"
+
+_WEIGHT_ALIASES = {
+    "mg": "mg",
+    "g": "g",
+    "gram": "g",
+    "grams": "g",
+    "kg": "kg",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "lb": "lb",
+    "lbs": "lb",
+    "pound": "lb",
+    "pounds": "lb",
+}
+
+_CAPACITY_ALIASES = {
+    "ml": "ml",
+    "milliliter": "ml",
+    "milliliters": "ml",
+    "millilitre": "ml",
+    "millilitres": "ml",
+    "l": "l",
+    "liter": "l",
+    "liters": "l",
+    "litre": "l",
+    "litres": "l",
+}
+
+_WEIGHT_TO_GRAMS = {
+    "mg": Decimal("0.001"),
+    "g": Decimal("1"),
+    "kg": Decimal("1000"),
+    "lb": Decimal("453.59237"),
+}
+
+_CAPACITY_TO_MILLILITRES = {
+    "ml": Decimal("1"),
+    "l": Decimal("1000"),
+}
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
@@ -79,13 +119,28 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
 
 
 def _number_string(raw: str) -> str | None:
-    """Normalise numeric formatting without changing the value."""
+    """Normalise numeric formatting without changing its value."""
+
     try:
         value = Decimal(raw.replace(",", ""))
     except InvalidOperation:
         return None
 
-    if not value.is_finite():
+    if not value.is_finite() or value < 0:
+        return None
+
+    rendered = format(value.normalize(), "f")
+
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+
+    return rendered or "0"
+
+
+def _render_decimal(value: Decimal) -> str | None:
+    """Render a finite, non-negative decimal without trailing zeroes."""
+
+    if not value.is_finite() or value < 0:
         return None
 
     rendered = format(value.normalize(), "f")
@@ -97,7 +152,8 @@ def _number_string(raw: str) -> str | None:
 
 
 def _canonical_value(value: str, kind: str) -> str | None:
-    """Normalise supported spellings without converting units."""
+    """Normalise supported values to conservative comparison formats."""
+
     text = value.strip()
     number_match = re.search(_NUMBER, text)
 
@@ -158,35 +214,35 @@ def _canonical_value(value: str, kind: str) -> str | None:
 
         return f"{number} {unit_key}"
 
-    aliases = {
-        "milliliter": "ml",
-        "milliliters": "ml",
-        "millilitre": "ml",
-        "millilitres": "ml",
-        "liter": "l",
-        "liters": "l",
-        "litre": "l",
-        "litres": "l",
-        "gram": "g",
-        "grams": "g",
-        "kilogram": "kg",
-        "kilograms": "kg",
-        "pound": "lb",
-        "pounds": "lb",
-        "lbs": "lb",
-    }
+    if kind == "weight":
+        unit_key = _WEIGHT_ALIASES.get(unit, "")
+        factor = _WEIGHT_TO_GRAMS.get(unit_key)
 
-    unit_key = aliases.get(unit, unit)
+        if factor is None:
+            return None
 
-    allowed_units = {
-        "weight": {"mg", "g", "kg", "lb"},
-        "capacity": {"ml", "l"},
-    }
+        converted = _render_decimal(Decimal(number) * factor)
 
-    if unit_key not in allowed_units.get(kind, set()):
-        return None
+        if converted is None:
+            return None
 
-    return f"{number} {unit_key}"
+        return f"{converted} g"
+
+    if kind == "capacity":
+        unit_key = _CAPACITY_ALIASES.get(unit, "")
+        factor = _CAPACITY_TO_MILLILITRES.get(unit_key)
+
+        if factor is None:
+            return None
+
+        converted = _render_decimal(Decimal(number) * factor)
+
+        if converted is None:
+            return None
+
+        return f"{converted} ml"
+
+    return None
 
 
 def extract_structured_claims(
@@ -194,9 +250,14 @@ def extract_structured_claims(
 ) -> Sequence[StructuredClaim]:
     """Extract supported claims with offsets into the original text.
 
+    Comparison values for supported weight claims are expressed in grams.
+    Comparison values for supported capacity claims are expressed in
+    millilitres. The original claim text and its offsets are preserved.
+
     An empty tuple means extraction succeeded but found no supported
     claims. An unavailable extractor is represented separately by None.
     """
+
     claims: list[StructuredClaim] = []
     occupied_spans: set[tuple[int, int]] = set()
 

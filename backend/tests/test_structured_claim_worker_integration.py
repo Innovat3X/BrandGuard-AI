@@ -77,8 +77,8 @@ def test_worker_verifies_structured_price_and_hands_finding_to_persistence(
         attempts=0,
     )
 
-    # The worker's existing knowledge loader interface supplies
-    # already-approved, organisation-scoped fact versions.
+    # The worker's knowledge loader supplies approved,
+    # organisation-scoped fact versions.
     approved_fact = ApprovedFactVersionRecord(
         organization_id=organization_id,
         fact_id=fact_id,
@@ -98,8 +98,7 @@ def test_worker_verifies_structured_price_and_hands_finding_to_persistence(
         },
     )
 
-    # Include one parseable terminology rule so that the analysis has
-    # usable terminology knowledge as well as the structured fact.
+    # Supply one parseable terminology rule alongside the structured fact.
     approved_rule = ApprovedRuleVersionRecord(
         organization_id=organization_id,
         rule_id=uuid4(),
@@ -180,6 +179,7 @@ def test_worker_verifies_structured_price_and_hands_finding_to_persistence(
     session = FakeSession()
     queue = Mock()
 
+    # No live AI service is used by this deterministic integration test.
     with patch(
         "app.services.analysis_pipeline_factory.get_settings",
         return_value=SimpleNamespace(ai_provider="disabled"),
@@ -209,7 +209,9 @@ def test_worker_verifies_structured_price_and_hands_finding_to_persistence(
     assert persisted["job_id"] == job_id
     assert persisted["submission_version_id"] == submission_version_id
     assert persisted["claimed_attempt"] == 1
-    assert persisted["final_status"] == "completed"
+
+    # The deterministic factual check ran, but AI-only checks were disabled.
+    assert persisted["final_status"] == "partial"
     assert persisted["submission_status"] == "under_review"
 
     findings = persisted["findings"]
@@ -231,10 +233,11 @@ def test_worker_verifies_structured_price_and_hands_finding_to_persistence(
     assert finding["requires_human_review"] is True
     assert finding["finding_fingerprint"]
 
-    assert job.status == "completed"
+    assert job.status == "partial"
     assert session.commits >= 2
     assert session.rollbacks == 0
     queue.enqueue_analysis.assert_not_called()
+
     assert result is not None
-    assert result.status == "completed"
+    assert result.status == "partial"
     assert result.finding_count == 1
