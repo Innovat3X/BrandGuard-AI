@@ -27,6 +27,35 @@ export interface RegisterRequest {
   organization_name: string;
 }
 
+// Authentication responses
+export interface UserResponse {
+  id: UUID;
+  full_name: string;
+  email: string;
+}
+
+export interface OrganizationResponse {
+  id: UUID;
+  name: string;
+}
+
+export type UserRole = "admin" | "creator" | "reviewer";
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: "bearer";
+  expires_in: number;
+  user: UserResponse;
+  organization: OrganizationResponse;
+  role: UserRole;
+}
+
+export interface MeResponse {
+  user: UserResponse;
+  organization: OrganizationResponse;
+  role: UserRole;
+}
+
 // Submission statuses
 export type SubmissionStatus =
   | "draft"
@@ -76,6 +105,26 @@ export type DetectionMethod =
   | "ai_assisted"
   | "ocr"
   | "visual_check";
+
+// Status of an individual analysis check.
+export type CheckOutcomeStatus =
+  | "supported"
+  | "issues_found"
+  | "inconclusive"
+  | "check_unavailable"
+  | "disabled"
+  | "not_assessed"
+  | "coverage_limited";
+
+// Result describing what a check assessed.
+export interface CheckOutcome {
+  category: FindingCategory;
+  status: CheckOutcomeStatus;
+  message: string;
+  detection_method: DetectionMethod | null;
+  assessed_count: number;
+  scope: string | null;
+}
 
 // Evidence returned with a finding
 export interface FindingEvidence {
@@ -132,37 +181,63 @@ export interface AnalysisSummary {
   total: number;
 }
 
-// Completed analysis response
+// Completed or partial analysis result
 export interface AnalysisResultResponse {
   job_id: UUID;
   submission_id: UUID;
   submission_version_id: UUID;
   status: "completed" | "partial";
   findings: Finding[];
+  check_outcomes: CheckOutcome[];
   summary: AnalysisSummary;
 }
 
-// Response when analysis is queued
+// Response when analysis is queued or an existing job is reused.
+// Existing idempotent requests may return a status other than "queued".
 export interface AnalysisAcceptedResponse {
   job_id: UUID;
   submission_id: UUID;
   version_number: number;
-  status: "queued";
+  status: AnalysisJobStatus;
+}
+
+// Analysis job status response
+export interface AnalysisJobResponse {
+  job_id?: UUID;
+  submission_id?: UUID;
+  version_number?: number;
+  status: AnalysisJobStatus;
+  attempts?: number;
+  created_at?: ISODateTime;
+  updated_at?: ISODateTime;
+  started_at?: ISODateTime | null;
+  completed_at?: ISODateTime | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  check_outcomes: CheckOutcome[];
+}
+
+// Submission creation response
+export interface SubmissionCreatedResponse {
+  submission_id: UUID;
+  version_number: number;
+  status: SubmissionStatus;
+  created_at: ISODateTime;
 }
 
 // Submission content
 // Exactly one content source must be supplied.
 export type SubmissionContent =
   | {
-      title: string;
-      text: string;
-      file?: never;
-    }
+    title: string;
+    text: string;
+    file?: never;
+  }
   | {
-      title: string;
-      file: File;
-      text?: never;
-    };
+    title: string;
+    file: File;
+    text?: never;
+  };
 
 // Brand rule creation
 export interface CreateBrandRuleRequest {
@@ -183,14 +258,14 @@ export interface CreateBrandFactRequest {
 // Human review actions
 export type ReviewActionRequest =
   | {
-      action: "approve";
-      comment?: string;
-    }
+    action: "approve";
+    comment?: string;
+  }
   | {
-      action: "request_changes";
-      comment: string;
-    }
+    action: "request_changes";
+    comment: string;
+  }
   | {
-      action: "reject";
-      comment: string;
-    };
+    action: "reject";
+    comment: string;
+  };

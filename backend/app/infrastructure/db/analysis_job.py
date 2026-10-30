@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -91,6 +92,13 @@ class AnalysisJob(Base):
         nullable=True,
     )
 
+    check_outcomes: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+
     attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -99,6 +107,21 @@ class AnalysisJob(Base):
     )
 
     started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    dispatch_lease_token: Mapped[str | None] = mapped_column(
+        String(),
+        nullable=True,
+    )
+
+    dispatch_lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )

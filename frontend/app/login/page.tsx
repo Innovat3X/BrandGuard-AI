@@ -1,11 +1,14 @@
-
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
+
+import { ApiError } from "@/lib/api-client";
+import { loginUser } from "@/services/auth.service";
 
 const loginSchema = z.object({
   email: z.email("Enter a valid email address."),
@@ -15,7 +18,10 @@ const loginSchema = z.object({
 type LoginValues = z.infer<typeof loginSchema>;
 
 export default function LoginPage() {
+  const router = useRouter();
+
   const [notice, setNotice] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const {
     register,
@@ -29,10 +35,29 @@ export default function LoginPage() {
     },
   });
 
-  function onSubmit() {
-    setNotice(
-      "Your details passed validation. Live login will be enabled after the authentication API contract is finalised."
-    );
+  async function onSubmit(values: LoginValues) {
+    setNotice("");
+    setIsSubmitting(true);
+
+    try {
+      await loginUser({
+        email: values.email,
+        password: values.password,
+      });
+
+      router.replace("/");
+    } catch (error) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Sign in failed. Please try again.";
+
+      setNotice(message);
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -42,6 +67,7 @@ export default function LoginPage() {
           <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-violet-600 text-xl font-bold text-white">
             B
           </span>
+
           <span className="text-xl font-bold text-slate-900">
             BrandGuard <span className="text-violet-600">AI</span>
           </span>
@@ -51,6 +77,7 @@ export default function LoginPage() {
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">
             Welcome back
           </h1>
+
           <p className="mt-2 text-sm leading-6 text-slate-500">
             Sign in to manage your organisation&apos;s brand governance.
           </p>
@@ -68,6 +95,7 @@ export default function LoginPage() {
             >
               Email address
             </label>
+
             <input
               id="email"
               type="email"
@@ -77,6 +105,7 @@ export default function LoginPage() {
               {...register("email")}
               className="w-full rounded-lg border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
             />
+
             {errors.email && (
               <p role="alert" className="mt-1.5 text-xs text-red-600">
                 {errors.email.message}
@@ -91,6 +120,7 @@ export default function LoginPage() {
             >
               Password
             </label>
+
             <input
               id="password"
               type="password"
@@ -100,6 +130,7 @@ export default function LoginPage() {
               {...register("password")}
               className="w-full rounded-lg border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
             />
+
             {errors.password && (
               <p role="alert" className="mt-1.5 text-xs text-red-600">
                 {errors.password.message}
@@ -109,8 +140,8 @@ export default function LoginPage() {
 
           {notice && (
             <p
-              role="status"
-              className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+              role="alert"
+              className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800"
             >
               {notice}
             </p>
@@ -118,9 +149,10 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            className="w-full rounded-lg bg-violet-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:ring-offset-2"
+            disabled={isSubmitting}
+            className="w-full rounded-lg bg-violet-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Sign in
+            {isSubmitting ? "Signing in…" : "Sign in"}
           </button>
         </form>
 

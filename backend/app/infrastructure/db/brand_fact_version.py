@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Uuid,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.db.base import Base
@@ -22,10 +24,7 @@ class BrandFactVersion(Base):
     __tablename__ = "brand_fact_versions"
 
     __table_args__ = (
-        UniqueConstraint(
-            "fact_id",
-            "version_number",
-        ),
+        UniqueConstraint("fact_id", "version_number"),
         UniqueConstraint(
             "organization_id",
             "id",
@@ -43,6 +42,44 @@ class BrandFactVersion(Base):
         CheckConstraint(
             "status IN ('draft', 'approved', 'archived')",
             name="valid_status",
+        ),
+        CheckConstraint(
+            """
+            (
+                fact_key IS NULL
+                AND structured_value IS NULL
+            )
+            OR
+            (
+                fact_key IS NOT NULL
+                AND structured_value IS NOT NULL
+            )
+            """,
+            name="structured_fields_pair",
+        ),
+        CheckConstraint(
+            """
+            fact_key IS NULL OR fact_key IN (
+                'product_price',
+                'discount_percentage',
+                'warranty_duration',
+                'battery_life_duration',
+                'product_weight',
+                'product_capacity'
+            )
+            """,
+            name="supported_fact_key",
+        ),
+        CheckConstraint(
+            """
+            structured_value IS NULL OR (
+                jsonb_typeof(structured_value) = 'object'
+                AND structured_value ? 'kind'
+                AND structured_value ? 'value'
+                AND structured_value ? 'unit'
+            )
+            """,
+            name="structured_value_shape",
         ),
     )
 
@@ -77,6 +114,18 @@ class BrandFactVersion(Base):
 
     source_url: Mapped[str | None] = mapped_column(
         String(),
+        nullable=True,
+    )
+
+    fact_key: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+
+    # Important: Python None must become SQL NULL, not JSON null.
+    structured_value: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True),
         nullable=True,
     )
 

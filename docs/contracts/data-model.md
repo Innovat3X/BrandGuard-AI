@@ -109,6 +109,8 @@ This is the parent record for a logical brand rule. Version-specific content and
 
 Enforce `UNIQUE (rule_id, version_number)`. An approved version must not be silently overwritten. A change to an approved rule creates a new version and preserves any version referenced by findings.
 
+A draft version may be updated only while it is the latest version for the rule and remains in `draft` status. Updating a draft changes that draft version's fields without creating another version. An approved or archived version must not be edited; changes after approval require creating a new draft version. The parent rule title remains on `brand_rules`, as defined in this data model.
+
 ### 3.6 `brand_facts`
 
 This is the parent record for a logical fact. Fact text, source and approval state belong in `brand_fact_versions`.
@@ -211,13 +213,14 @@ Enforce `UNIQUE (submission_id, version_number)`. Preserve the original private 
 | `status` | Required job status as defined in Section 4.6 |
 | `idempotency_key` | Required key for safe job creation/retry and duplicate prevention |
 | `requested_checks` | Optional structured list/configuration of requested checks (`JSONB` where appropriate) |
-| `attempts` | Required non-negative retry/attempt count |
-| `started_at` | Nullable UTC timestamp |
+| `check_outcomes` | Required JSONB array containing the persisted outcome of each analysis check; defaults to an empty array until outcomes are written |
+| `attempts` | Required non-negative retry/attempt count; incremented atomically for each successful claim |
+| `started_at` | Nullable UTC timestamp recording the first-ever processing start; preserved across retries |
 | `completed_at` | Nullable UTC timestamp when the job reaches a terminal completed/partial/failed outcome |
 | `error_code` | Nullable safe machine-readable failure code |
 | `error_message` | Nullable user-safe failure detail; must not include stack traces or secrets |
 | `created_at` | Required UTC timestamp |
-| `updated_at` | Required UTC timestamp; updated when job state changes |
+| `updated_at` | Required UTC timestamp; refreshed on job state changes and successful claims; while processing, it is the available staleness baseline unless a dedicated heartbeat/attempt timestamp is introduced |
 
 Enforce uniqueness of `idempotency_key` within the intended organisation/job scope (canonical constraint: `UNIQUE (organization_id, idempotency_key)`). A submission version can have multiple jobs over time when a deliberately distinct analysis is requested; retries of the same logical job must reuse the idempotency key and must not duplicate persisted findings.
 
@@ -387,6 +390,7 @@ The supplied contracts require a controlled `brand_assets.status` field, and the
 
 - One organisation owns many memberships, brand rules, brand facts, brand assets and submissions.
 - Users may have memberships in multiple organisations. A membership connects one user to one organisation and grants one role.
+- The membership repository may list all memberships for a given user to support authentication and organisation-selection flows. This lookup does not itself select the active organisation. Because the login contract returns one organisation and one role, the API, database and frontend owners must agree on the selection behavior before the login service implements it. Do not infer an active organisation from repository result ordering.
 - One brand rule has many immutable rule versions.
 - One brand fact has many immutable fact versions.
 - One submission has many immutable submission versions.

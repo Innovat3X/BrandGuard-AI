@@ -1,0 +1,70 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "web": {
+      "root": "frontend/",
+      "framework": "nextjs"
+    },
+    "api": {
+      "root": "backend/",
+      "entrypoint": "app.main:app",
+      "framework": "fastapi"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "api"
+      }
+    },
+    {
+      "source": "/health",
+      "destination": {
+        "service": "api"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "web"
+      }
+    }
+  ],
+  "daemons": {
+    "celery-worker": {
+      "root": "backend/",
+      "entrypoint": "Dockerfile",
+      "command": [
+        "python",
+        "-m",
+        "celery",
+        "-A",
+        "app.workers.celery_app.celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "-Q",
+        "analysis"
+      ],
+      "instances": {
+        "bom1": 1
+      }
+    },
+    "celery-beat": {
+      "root": "backend/",
+      "entrypoint": "Dockerfile",
+      "command": [
+        "python",
+        "-m",
+        "celery",
+        "-A",
+        "app.workers.celery_app.celery_app",
+        "beat",
+        "--loglevel=INFO"
+      ],
+      "instances": {
+        "bom1": 1
+      }
+    }
+  }
+}

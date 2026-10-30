@@ -1,18 +1,12 @@
 import { apiRequest } from "@/lib/api-client";
+import type { AnalysisJobStatus, UUID } from "@/types/api-contracts";
 
-import type {
-  AnalysisJobStatus,
-  UUID,
-} from "@/types/api-contracts";
-
-// Minimal response type based on the confirmed API contract.
-// Additional fields will be added after Bhumika confirms
-// the implemented response schema.
 export interface AnalysisJobResponse {
   status: AnalysisJobStatus;
+  error_code?: string | null;
+  error_message?: string | null;
 }
 
-// Retrieve the current status of an analysis job.
 export async function getAnalysisJob(
   jobId: UUID
 ): Promise<AnalysisJobResponse> {
@@ -22,8 +16,6 @@ export async function getAnalysisJob(
 
   return apiRequest<AnalysisJobResponse>(
     `/api/v1/analysis-jobs/${encodeURIComponent(jobId)}`,
-    {
-      method: "GET",
-    }
+    { method: "GET" }
   );
 }

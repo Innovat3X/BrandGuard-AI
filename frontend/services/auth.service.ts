@@ -1,6 +1,10 @@
-import { apiRequest } from "@/lib/api-client";
+import {
+  apiRequest,
+  saveAccessToken,
+} from "@/lib/api-client";
 
 import type {
+  LoginRequest,
   RegisterRequest,
   UUID,
 } from "@/types/api-contracts";
@@ -33,17 +37,38 @@ export interface MeResponse {
   role: UserRole;
 }
 
+// Authenticate an existing user and retain the returned token.
+export async function loginUser(
+  data: LoginRequest
+): Promise<AuthResponse> {
+  const response = await apiRequest<AuthResponse>(
+    "/api/v1/auth/login",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    }
+  );
+
+  saveAccessToken(response.access_token);
+
+  return response;
+}
+
 // Register a user and create their initial organisation.
 export async function registerUser(
   data: RegisterRequest
 ): Promise<AuthResponse> {
-  return apiRequest<AuthResponse>(
+  const response = await apiRequest<AuthResponse>(
     "/api/v1/auth/register",
     {
       method: "POST",
       body: JSON.stringify(data),
     }
   );
+
+  saveAccessToken(response.access_token);
+
+  return response;
 }
 
 // Retrieve the authenticated user's active organisation.
