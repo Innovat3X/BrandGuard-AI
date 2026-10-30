@@ -2,6 +2,14 @@
 
 AI-powered brand governance platform for reviewing content against approved brand terminology and available brand knowledge before publication.
 
+## Project Demonstration
+
+Watch the deployed BrandGuard AI product demonstration:
+
+[![BrandGuard AI — Complete Live Product Demonstration]
+
+[Watch the demonstration on YouTube](https://youtu.be/ULJgc-X92_0)
+
 ## Prototype capabilities
 
 The current prototype supports:
