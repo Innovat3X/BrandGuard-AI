@@ -414,3 +414,66 @@ class BrandFactRepository:
             and expires_at <= effective_from
         ):
             raise ValueError("expires_at must be later than effective_from.")
+    def update_draft_fact(
+        self,
+        organization_id: UUID,
+        fact_id: UUID,
+        label: str,
+        fact_text: str,
+        source_url: str | None = None,
+        effective_from: datetime | None = None,
+        expires_at: datetime | None = None,
+        fact_key: str | None = None,
+        structured_value: dict[str, Any] | None = None,
+    ) -> tuple[BrandFact, BrandFactVersion] | None:
+        """Update a fact only while its latest version remains a draft."""
+        self._validate_version_fields(
+            fact_text,
+            fact_key,
+            structured_value,
+        )
+        self._validate_dates(effective_from, expires_at)
+
+        if not label.strip():
+            raise ValueError("Fact label must not be empty.")
+
+        fact = self._session.scalar(
+            select(BrandFact)
+            .where(
+                BrandFact.organization_id == organization_id,
+                BrandFact.id == fact_id,
+            )
+            .with_for_update()
+        )
+        if fact is None:
+            return None
+
+        latest_version = self._session.scalar(
+            select(BrandFactVersion)
+            .where(
+                BrandFactVersion.organization_id == organization_id,
+                BrandFactVersion.fact_id == fact_id,
+            )
+            .order_by(BrandFactVersion.version_number.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if latest_version is None:
+            return None
+
+        if latest_version.status != "draft":
+            raise ValueError(
+                "Only the latest draft fact version can be updated. "
+                "Create a new draft version before making changes."
+            )
+
+        fact.label = label.strip()
+        latest_version.fact_text = fact_text.strip()
+        latest_version.source_url = source_url
+        latest_version.fact_key = fact_key
+        latest_version.structured_value = structured_value
+        latest_version.effective_from = effective_from
+        latest_version.expires_at = expires_at
+        self._session.flush()
+
+        return fact, latest_version

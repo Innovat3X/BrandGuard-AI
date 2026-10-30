@@ -143,6 +143,29 @@ Request:
   "source_url": "https://example.com/source"
 }
 
+### PUT /api/v1/brand/facts/{fact_id}
+
+Update the latest draft fact version and its label. Only administrators
+and creators may update facts. Approved or archived versions cannot be
+overwritten; create a new draft version instead. This operation does not
+change the version number or approval history.
+
+The request uses the same fields as fact creation, including optional
+paired `fact_key` and `structured_value` fields and optional timezone-aware
+`effective_from` and `expires_at` timestamps.
+
+### POST /api/v1/brand/facts/{fact_id}/versions
+
+Append a new draft version to an existing fact. Only administrators and
+creators may create versions. The request contains `fact_text`, optional
+`source_url`, optional paired `fact_key` and `structured_value`, and
+optional timezone-aware `effective_from` and `expires_at` timestamps.
+The fact label remains unchanged. Existing versions are preserved, and a
+new version cannot be appended while the latest version is still a draft.
+
+Fact approval is restricted to administrators and reviewers. All fact
+reads and writes are scoped to the authenticated organisation.
+
 ### POST /api/v1/brand/facts/{fact_id}/approve
 
 Approve the applicable draft fact version.

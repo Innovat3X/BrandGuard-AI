@@ -81,6 +81,8 @@ class CreateBrandFactRequest(BaseModel):
     source_url: str | None = None
     fact_key: FactKey | None = None
     structured_value: StructuredFactValue | None = None
+    effective_from: datetime | None = None
+    expires_at: datetime | None = None
 
     @field_validator("label", "fact_text", mode="before")
     @classmethod
@@ -94,6 +96,22 @@ class CreateBrandFactRequest(BaseModel):
 
         if not self.fact_text:
             raise ValueError("fact_text must not be blank.")
+
+        for field_name, value in (
+            ("effective_from", self.effective_from),
+            ("expires_at", self.expires_at),
+        ):
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError(f"{field_name} must be timezone-aware.")
+
+        if (
+            self.effective_from is not None
+            and self.expires_at is not None
+            and self.expires_at <= self.effective_from
+        ):
+            raise ValueError("expires_at must be later than effective_from.")
 
         if (self.fact_key is None) != (self.structured_value is None):
             raise ValueError(
@@ -118,6 +136,39 @@ class CreateBrandFactRequest(BaseModel):
 
         return self
 
+
+class UpdateBrandFactRequest(CreateBrandFactRequest):
+    """Replace the content of the latest draft fact version."""
+
+
+class CreateBrandFactVersionRequest(BaseModel):
+    """Append a new draft version without changing earlier versions."""
+
+    fact_text: str = Field(min_length=1)
+    source_url: str | None = None
+    fact_key: FactKey | None = None
+    structured_value: StructuredFactValue | None = None
+    effective_from: datetime | None = None
+    expires_at: datetime | None = None
+
+    @field_validator("fact_text", mode="before")
+    @classmethod
+    def strip_fact_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_version_fields(self) -> "CreateBrandFactVersionRequest":
+        # Reuse the same validation rules as initial fact creation.
+        CreateBrandFactRequest(
+            label="Version validation",
+            fact_text=self.fact_text,
+            source_url=self.source_url,
+            fact_key=self.fact_key,
+            structured_value=self.structured_value,
+            effective_from=self.effective_from,
+            expires_at=self.expires_at,
+        )
+        return self
 
 class BrandFactVersionResponse(BaseModel):
     id: UUID

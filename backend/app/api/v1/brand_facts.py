@@ -14,6 +14,8 @@ from app.schemas.brand_facts import (
     BrandFactsListResponse,
     BrandFactVersionResponse,
     CreateBrandFactRequest,
+    CreateBrandFactVersionRequest,
+    UpdateBrandFactRequest,
 )
 from app.services.brand_fact_service import (
     BrandFactConflictError,
@@ -118,6 +120,8 @@ def create_brand_fact(
             label=request.label,
             fact_text=request.fact_text,
             source_url=request.source_url,
+            effective_from=request.effective_from,
+            expires_at=request.expires_at,
             fact_key=request.fact_key,
             structured_value=structured_value,
         )
@@ -126,6 +130,88 @@ def create_brand_fact(
             status_code=422,
             detail=str(exc),
         ) from exc
+
+    return _fact_response(fact, versions)
+
+@router.put(
+    "/{fact_id}",
+    response_model=BrandFactResponse,
+)
+def update_brand_fact(
+    fact_id: UUID,
+    request: UpdateBrandFactRequest,
+    actor: AuthenticatedActor = Depends(get_current_actor),
+    db: Session = Depends(get_db),
+) -> BrandFactResponse:
+    """Update the latest draft version without rewriting approved history."""
+    require_creator_or_admin(actor)
+
+    structured_value: dict[str, Any] | None = (
+        request.structured_value.model_dump(mode="json")
+        if request.structured_value is not None
+        else None
+    )
+
+    try:
+        fact, versions = BrandFactService(db).update_latest_draft(
+            organization_id=actor.organization.id,
+            fact_id=fact_id,
+            label=request.label,
+            fact_text=request.fact_text,
+            source_url=request.source_url,
+            effective_from=request.effective_from,
+            expires_at=request.expires_at,
+            fact_key=request.fact_key,
+            structured_value=structured_value,
+        )
+    except BrandFactNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BrandFactConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return _fact_response(fact, versions)
+
+
+@router.post(
+    "/{fact_id}/versions",
+    response_model=BrandFactResponse,
+    status_code=201,
+)
+def create_brand_fact_version(
+    fact_id: UUID,
+    request: CreateBrandFactVersionRequest,
+    actor: AuthenticatedActor = Depends(get_current_actor),
+    db: Session = Depends(get_db),
+) -> BrandFactResponse:
+    """Append a new draft version while preserving prior fact versions."""
+    require_creator_or_admin(actor)
+
+    structured_value: dict[str, Any] | None = (
+        request.structured_value.model_dump(mode="json")
+        if request.structured_value is not None
+        else None
+    )
+
+    try:
+        fact, versions = BrandFactService(db).create_draft_version(
+            organization_id=actor.organization.id,
+            fact_id=fact_id,
+            created_by=actor.user.id,
+            fact_text=request.fact_text,
+            source_url=request.source_url,
+            effective_from=request.effective_from,
+            expires_at=request.expires_at,
+            fact_key=request.fact_key,
+            structured_value=structured_value,
+        )
+    except BrandFactNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BrandFactConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return _fact_response(fact, versions)
 

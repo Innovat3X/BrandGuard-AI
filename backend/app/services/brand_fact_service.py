@@ -1,5 +1,6 @@
 """Application service for versioned brand facts."""
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -58,6 +59,8 @@ class BrandFactService:
         label: str,
         fact_text: str,
         source_url: str | None = None,
+        effective_from: datetime | None = None,
+        expires_at: datetime | None = None,
         fact_key: str | None = None,
         structured_value: dict[str, Any] | None = None,
     ) -> tuple[BrandFact, list[BrandFactVersion]]:
@@ -69,6 +72,8 @@ class BrandFactService:
                 fact_text=fact_text,
                 created_by=created_by,
                 source_url=source_url,
+                effective_from=effective_from,
+                expires_at=expires_at,
                 fact_key=fact_key,
                 structured_value=structured_value,
             )
@@ -144,6 +149,142 @@ class BrandFactService:
 
             return fact, versions
 
+        except Exception:
+            self._session.rollback()
+            raise
+    def update_latest_draft(
+        self,
+        *,
+        organization_id: UUID,
+        fact_id: UUID,
+        label: str,
+        fact_text: str,
+        source_url: str | None = None,
+        effective_from: datetime | None = None,
+        expires_at: datetime | None = None,
+        fact_key: str | None = None,
+        structured_value: dict[str, Any] | None = None,
+    ) -> tuple[BrandFact, list[BrandFactVersion]]:
+        """Edit the latest draft without changing approved fact history."""
+        try:
+            versions = self._repository.list_fact_versions(
+                organization_id=organization_id,
+                fact_id=fact_id,
+            )
+            if versions is None or not versions:
+                raise BrandFactNotFoundError("Brand fact not found.")
+
+            if versions[-1].status != "draft":
+                raise BrandFactConflictError(
+                    "Only the latest draft fact version can be updated. "
+                    "Create a new draft version before making changes."
+                )
+
+            updated = self._repository.update_draft_fact(
+                organization_id=organization_id,
+                fact_id=fact_id,
+                label=label,
+                fact_text=fact_text,
+                source_url=source_url,
+                effective_from=effective_from,
+                expires_at=expires_at,
+                fact_key=fact_key,
+                structured_value=structured_value,
+            )
+            if updated is None:
+                raise BrandFactNotFoundError("Brand fact not found.")
+
+            fact, version = updated
+            self._session.commit()
+            self._session.refresh(fact)
+            self._session.refresh(version)
+
+            refreshed_versions = self._repository.list_fact_versions(
+                organization_id=organization_id,
+                fact_id=fact_id,
+            )
+            if refreshed_versions is None:
+                raise BrandFactNotFoundError(
+                    "Brand fact could not be retrieved after updating."
+                )
+
+            return fact, refreshed_versions
+        except (BrandFactNotFoundError, BrandFactConflictError):
+            self._session.rollback()
+            raise
+        except ValueError as exc:
+            self._session.rollback()
+            if "latest draft fact version" in str(exc):
+                raise BrandFactConflictError(str(exc)) from exc
+            raise
+        except Exception:
+            self._session.rollback()
+            raise
+
+    def create_draft_version(
+        self,
+        *,
+        organization_id: UUID,
+        fact_id: UUID,
+        created_by: UUID,
+        fact_text: str,
+        source_url: str | None = None,
+        effective_from: datetime | None = None,
+        expires_at: datetime | None = None,
+        fact_key: str | None = None,
+        structured_value: dict[str, Any] | None = None,
+    ) -> tuple[BrandFact, list[BrandFactVersion]]:
+        """Append a draft version while retaining the complete fact history."""
+        try:
+            fact = self._repository.get_fact(
+                organization_id=organization_id,
+                fact_id=fact_id,
+            )
+            if fact is None:
+                raise BrandFactNotFoundError("Brand fact not found.")
+
+            existing_versions = self._repository.list_fact_versions(
+                organization_id=organization_id,
+                fact_id=fact_id,
+            )
+            if existing_versions is None:
+                raise BrandFactNotFoundError("Brand fact not found.")
+            if existing_versions and existing_versions[-1].status == "draft":
+                raise BrandFactConflictError(
+                    "A draft fact version already exists. Update or approve "
+                    "it before creating another version."
+                )
+
+            version = self._repository.create_fact_version(
+                organization_id=organization_id,
+                fact_id=fact_id,
+                fact_text=fact_text,
+                created_by=created_by,
+                source_url=source_url,
+                effective_from=effective_from,
+                expires_at=expires_at,
+                fact_key=fact_key,
+                structured_value=structured_value,
+            )
+            self._session.commit()
+            self._session.refresh(fact)
+            self._session.refresh(version)
+
+            versions = self._repository.list_fact_versions(
+                organization_id=organization_id,
+                fact_id=fact_id,
+            )
+            if versions is None:
+                raise BrandFactNotFoundError(
+                    "Brand fact could not be retrieved after version creation."
+                )
+            return fact, versions
+        except (BrandFactNotFoundError, BrandFactConflictError):
+            self._session.rollback()
+            raise
+        except LookupError as exc:
+            self._session.rollback()
+            raise BrandFactNotFoundError(str(exc)) from exc
         except Exception:
             self._session.rollback()
             raise

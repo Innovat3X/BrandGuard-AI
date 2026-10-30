@@ -251,3 +251,236 @@ def test_other_organisation_cannot_approve_fact(client: TestClient):
     )
 
     assert response.status_code == 404
+def test_admin_can_update_latest_draft_fact(client: TestClient):
+    auth = register_user(client)
+    create_response = client.post(
+        "/api/v1/brand/facts",
+        json=structured_price_payload(),
+        headers=auth_headers(auth),
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+    original_version_id = created["versions"][0]["id"]
+
+    response = client.put(
+        f"/api/v1/brand/facts/{created['id']}",
+        json={
+            "label": "Updated product price",
+            "fact_text": "The approved product price is ₹1499.",
+            "source_url": "https://example.com/updated-product",
+            "fact_key": "product_price",
+            "structured_value": {
+                "kind": "currency",
+                "value": "1499",
+                "unit": "INR",
+            },
+        },
+        headers=auth_headers(auth),
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["label"] == "Updated product price"
+    assert len(updated["versions"]) == 1
+    version = updated["versions"][0]
+    assert version["id"] == original_version_id
+    assert version["version_number"] == 1
+    assert version["status"] == "draft"
+    assert version["fact_text"] == "The approved product price is ₹1499."
+    assert version["structured_value"]["value"] == "1499"
+
+
+def test_approved_fact_version_cannot_be_updated(client: TestClient):
+    auth = register_user(client)
+    create_response = client.post(
+        "/api/v1/brand/facts",
+        json=structured_price_payload(),
+        headers=auth_headers(auth),
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+
+    approve_response = client.post(
+        f"/api/v1/brand/facts/{created['id']}/approve",
+        headers=auth_headers(auth),
+    )
+    assert approve_response.status_code == 200
+
+    update_response = client.put(
+        f"/api/v1/brand/facts/{created['id']}",
+        json={
+            "label": "Attempted overwrite",
+            "fact_text": "This must not overwrite approved history.",
+        },
+        headers=auth_headers(auth),
+    )
+
+    assert update_response.status_code == 409
+
+
+def test_new_fact_version_preserves_approved_history(client: TestClient):
+    auth = register_user(client)
+    create_response = client.post(
+        "/api/v1/brand/facts",
+        json=structured_price_payload(),
+        headers=auth_headers(auth),
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+    original_version = created["versions"][0]
+
+    approve_response = client.post(
+        f"/api/v1/brand/facts/{created['id']}/approve",
+        headers=auth_headers(auth),
+    )
+    assert approve_response.status_code == 200
+
+    response = client.post(
+        f"/api/v1/brand/facts/{created['id']}/versions",
+        json={
+            "fact_text": "The approved product price is ₹1499.",
+            "source_url": "https://example.com/new-price",
+            "fact_key": "product_price",
+            "structured_value": {
+                "kind": "currency",
+                "value": "1499",
+                "unit": "INR",
+            },
+            "effective_from": "2026-11-01T00:00:00Z",
+        },
+        headers=auth_headers(auth),
+    )
+
+    assert response.status_code == 201
+    result = response.json()
+    assert result["label"] == created["label"]
+    assert len(result["versions"]) == 2
+    first, second = result["versions"]
+    assert first["id"] == original_version["id"]
+    assert first["version_number"] == 1
+    assert first["status"] == "approved"
+    assert first["fact_text"] == original_version["fact_text"]
+    assert second["version_number"] == 2
+    assert second["status"] == "draft"
+    assert second["fact_text"] == "The approved product price is ₹1499."
+
+
+def test_new_fact_version_rejected_while_draft_is_pending(
+    client: TestClient,
+):
+    auth = register_user(client)
+    create_response = client.post(
+        "/api/v1/brand/facts",
+        json=structured_price_payload(),
+        headers=auth_headers(auth),
+    )
+    assert create_response.status_code == 201
+    fact_id = create_response.json()["id"]
+
+    response = client.post(
+        f"/api/v1/brand/facts/{fact_id}/versions",
+        json={"fact_text": "A second draft must wait for review."},
+        headers=auth_headers(auth),
+    )
+
+    assert response.status_code == 409
+
+
+def test_other_organisation_cannot_update_or_version_fact(
+    client: TestClient,
+):
+    owner = register_user(client, email="facts-version-owner@example.test")
+    create_response = client.post(
+        "/api/v1/brand/facts",
+        json=structured_price_payload(),
+        headers=auth_headers(owner),
+    )
+    assert create_response.status_code == 201
+    fact_id = create_response.json()["id"]
+
+    other_user = register_user(
+        client,
+        email="facts-version-other@example.test",
+    )
+
+    update_response = client.put(
+        f"/api/v1/brand/facts/{fact_id}",
+        json={"label": "Unauthorised", "fact_text": "Unauthorised edit."},
+        headers=auth_headers(other_user),
+    )
+    version_response = client.post(
+        f"/api/v1/brand/facts/{fact_id}/versions",
+        json={"fact_text": "Unauthorised new version."},
+        headers=auth_headers(other_user),
+    )
+
+    assert update_response.status_code == 404
+    assert version_response.status_code == 404
+
+
+def test_reviewer_cannot_edit_or_create_fact_version(
+    client: TestClient,
+    db_session: Session,
+):
+    auth = register_user(client)
+    create_response = client.post(
+        "/api/v1/brand/facts",
+        json=structured_price_payload(),
+        headers=auth_headers(auth),
+    )
+    assert create_response.status_code == 201
+    fact_id = create_response.json()["id"]
+
+    membership = OrganizationMembershipRepository(db_session).get_membership(
+        organization_id=auth["organization"]["id"],
+        user_id=auth["user"]["id"],
+    )
+    assert membership is not None
+    membership.role = "reviewer"
+    db_session.flush()
+
+    update_response = client.put(
+        f"/api/v1/brand/facts/{fact_id}",
+        json={"label": "Reviewer edit", "fact_text": "Not permitted."},
+        headers=auth_headers(auth),
+    )
+    version_response = client.post(
+        f"/api/v1/brand/facts/{fact_id}/versions",
+        json={"fact_text": "Reviewer version."},
+        headers=auth_headers(auth),
+    )
+
+    assert update_response.status_code == 403
+    assert version_response.status_code == 403
+
+
+def test_fact_version_rejects_invalid_structured_value(client: TestClient):
+    auth = register_user(client)
+    create_response = client.post(
+        "/api/v1/brand/facts",
+        json=structured_price_payload(),
+        headers=auth_headers(auth),
+    )
+    assert create_response.status_code == 201
+    fact_id = create_response.json()["id"]
+
+    client.post(
+        f"/api/v1/brand/facts/{fact_id}/approve",
+        headers=auth_headers(auth),
+    )
+
+    response = client.post(
+        f"/api/v1/brand/facts/{fact_id}/versions",
+        json={
+            "fact_text": "The product price is 1499.",
+            "fact_key": "product_price",
+            "structured_value": {
+                "kind": "currency",
+                "value": "1499",
+                "unit": "JPY",
+            },
+        },
+        headers=auth_headers(auth),
+    )
+
+    assert response.status_code == 422
