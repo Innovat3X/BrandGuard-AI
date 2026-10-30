@@ -1,11 +1,10 @@
 import { apiRequest } from "@/lib/api-client";
-import type { AnalysisJobStatus, UUID } from "@/types/api-contracts";
+import type {
+  AnalysisJobResponse as ApiAnalysisJobResponse,
+  UUID,
+} from "@/types/api-contracts";
 
-export interface AnalysisJobResponse {
-  status: AnalysisJobStatus;
-  error_code?: string | null;
-  error_message?: string | null;
-}
+export type AnalysisJobResponse = ApiAnalysisJobResponse;
 
 export async function getAnalysisJob(
   jobId: UUID

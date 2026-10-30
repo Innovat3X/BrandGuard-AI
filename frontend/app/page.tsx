@@ -22,6 +22,7 @@ import {
 
 import type {
   AnalysisJobStatus,
+  CheckOutcome,
   Finding,
 } from "@/types/api-contracts";
 
@@ -54,6 +55,7 @@ type Submission = {
   jobId?: string;
   jobStatus?: AnalysisJobStatus;
   findings?: Finding[];
+  checkOutcomes?: CheckOutcome[];
 };
 
 const navigation: { label: View; icon: string }[] = [
@@ -284,7 +286,8 @@ export default function Home() {
           (item) =>
             item.jobId &&
             (item.jobStatus === "queued" ||
-              item.jobStatus === "processing"),
+              item.jobStatus === "processing" ||
+              item.checkOutcomes === undefined),
         );
 
         for (const item of activeJobs) {
@@ -325,6 +328,7 @@ export default function Home() {
                     ...row,
                     status: nextStatus,
                     jobStatus: job.status,
+                    checkOutcomes: job.check_outcomes ?? [],
                     ...(findings !== undefined
                       ? {
                         findings,
@@ -960,6 +964,85 @@ export default function Home() {
                       <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
                         Analysis failed. Check the worker logs and API response.
                       </div>
+                    )}
+
+                    {selectedSubmission.jobId && (
+                      <section className="rounded-xl border border-slate-200 bg-white p-5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="font-semibold text-slate-900">
+                            Individual check outcomes
+                          </h3>
+                          <span className="text-xs text-slate-500">
+                            Returned by the analysis worker
+                          </span>
+                        </div>
+
+                        {selectedSubmission.checkOutcomes === undefined ? (
+                          <p className="mt-3 text-sm text-slate-500">
+                            Loading check outcomes from the analysis job.
+                          </p>
+                        ) : selectedSubmission.checkOutcomes.length === 0 ? (
+                          <p className="mt-3 text-sm text-slate-500">
+                            {selectedSubmission.jobStatus === "queued" ||
+                            selectedSubmission.jobStatus === "processing"
+                              ? "Waiting for check outcomes from the analysis job."
+                              : "No check outcomes have been reported for this job."}
+                          </p>
+                        ) : (
+                          <div className="mt-4 grid gap-3 md:grid-cols-2">
+                            {selectedSubmission.checkOutcomes.map((outcome, index) => {
+                              const statusClass =
+                                outcome.status === "supported"
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : outcome.status === "check_unavailable"
+                                    ? "bg-rose-50 text-rose-700"
+                                    : outcome.status === "disabled" ||
+                                      outcome.status === "not_assessed"
+                                      ? "bg-slate-100 text-slate-600"
+                                      : "bg-amber-50 text-amber-800";
+
+                              return (
+                                <article
+                                  key={`${outcome.category}-${index}`}
+                                  className="rounded-lg border border-slate-200 p-4"
+                                >
+                                  <div className="flex flex-wrap items-start justify-between gap-2">
+                                    <h4 className="font-medium capitalize text-slate-900">
+                                      {outcome.category.replaceAll("_", " ")}
+                                    </h4>
+                                    <span
+                                      className={`rounded-full px-2.5 py-1 text-xs font-medium capitalize ${statusClass}`}
+                                    >
+                                      {outcome.status.replaceAll("_", " ")}
+                                    </span>
+                                  </div>
+
+                                  <p className="mt-2 text-sm leading-5 text-slate-600">
+                                    {outcome.message}
+                                  </p>
+
+                                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                                    <span>
+                                      Items assessed: {outcome.assessed_count}
+                                    </span>
+                                    {outcome.detection_method && (
+                                      <span>
+                                        Method: {outcome.detection_method.replaceAll("_", " ")}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {outcome.scope && (
+                                    <p className="mt-2 text-xs text-slate-500">
+                                      Scope: {outcome.scope}
+                                    </p>
+                                  )}
+                                </article>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </section>
                     )}
 
                     {!selectedSubmission.jobId && (
