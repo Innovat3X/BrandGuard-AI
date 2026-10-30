@@ -145,7 +145,7 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
         result = worker.process_job(job.id)
 
     assert result is not None
-    assert result.status == "partial"
+    assert result.status == "completed"
     assert result.finding_count == 1
 
     # Reload records to verify the persisted database state.
@@ -159,7 +159,7 @@ def test_postgres_structured_fact_finding_persists_and_is_retrievable(
     )
 
     assert saved_job is not None
-    assert saved_job.status == "partial"
+    assert saved_job.status == "completed"
     assert saved_job.completed_at is not None
 
     saved_findings = list(

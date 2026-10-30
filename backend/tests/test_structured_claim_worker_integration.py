@@ -211,7 +211,7 @@ def test_worker_verifies_structured_price_and_hands_finding_to_persistence(
     assert persisted["claimed_attempt"] == 1
 
     # The deterministic factual check ran, but AI-only checks were disabled.
-    assert persisted["final_status"] == "partial"
+    assert persisted["final_status"] == "completed"
     assert persisted["submission_status"] == "under_review"
 
     findings = persisted["findings"]
@@ -233,11 +233,11 @@ def test_worker_verifies_structured_price_and_hands_finding_to_persistence(
     assert finding["requires_human_review"] is True
     assert finding["finding_fingerprint"]
 
-    assert job.status == "partial"
+    assert job.status == "completed"
     assert session.commits >= 2
     assert session.rollbacks == 0
     queue.enqueue_analysis.assert_not_called()
 
     assert result is not None
-    assert result.status == "partial"
+    assert result.status == "completed"
     assert result.finding_count == 1

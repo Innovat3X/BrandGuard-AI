@@ -520,16 +520,24 @@ class DatabaseAnalysisPipeline:
             for category in _AI_CATEGORIES
         ]
 
+        combined_outcomes = [
+            *existing_outcomes,
+            *disabled_outcomes,
+        ]
+
+        final_status = DatabaseAnalysisPipeline._calculate_final_status(
+            deterministic_status=result.status,
+            findings=result.findings,
+            outcomes=combined_outcomes,
+        )
+
         return build_analysis_response(
             job_id=result.job_id,
             submission_id=result.submission_id,
             submission_version_id=result.submission_version_id,
             findings=result.findings,
-            status="partial",
-            check_outcomes=[
-                *existing_outcomes,
-                *disabled_outcomes,
-            ],
+            status=final_status,
+            check_outcomes=combined_outcomes,
         )
 
     @staticmethod

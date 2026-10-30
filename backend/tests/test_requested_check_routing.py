@@ -117,3 +117,30 @@ def test_request_schema_rejects_unknown_check_names():
         QueueAnalysisRequest(
             requested_checks={"visual_analysis": True}
         )
+
+
+@pytest.mark.parametrize(
+    "requested_checks",
+    [
+        {},
+        {
+            "tone": False,
+            "messaging": False,
+            "terminology": False,
+            "factual_claim": False,
+        },
+    ],
+)
+def test_request_schema_rejects_empty_check_selection(
+    requested_checks,
+):
+    with pytest.raises(
+        ValidationError,
+        match="At least one analysis check must be selected",
+    ):
+        QueueAnalysisRequest(requested_checks=requested_checks)
+
+
+def test_request_schema_preserves_default_selection():
+    request = QueueAnalysisRequest()
+    assert request.requested_checks is None
