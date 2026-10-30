@@ -4,7 +4,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.analysis.contracts import Finding
+from app.analysis.contracts import CheckOutcome, Finding
+
+
+AnalysisCheck = Literal[
+    "tone",
+    "messaging",
+    "terminology",
+    "factual_claim",
+]
 
 
 class SubmissionCreatedResponse(BaseModel):
@@ -16,6 +24,8 @@ class SubmissionCreatedResponse(BaseModel):
 
 class QueueAnalysisRequest(BaseModel):
     version_number: int | None = Field(default=None, ge=1)
+
+    requested_checks: dict[AnalysisCheck, bool] | None = None
 
 
 class AnalysisAcceptedResponse(BaseModel):
@@ -49,6 +59,7 @@ class AnalysisJobStatusResponse(BaseModel):
     completed_at: datetime | None = None
     error_code: str | None = None
     error_message: str | None = None
+    check_outcomes: list[CheckOutcome] = Field(default_factory=list)
 
 
 class FindingsListResponse(BaseModel):

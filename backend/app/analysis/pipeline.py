@@ -1,4 +1,3 @@
-
 import json
 from collections.abc import Sequence
 from typing import Literal
@@ -117,6 +116,42 @@ def _unavailable_finding(
         evidence=Evidence(source_name=source_name),
         detection_method=DetectionMethod.DETERMINISTIC,
         requires_human_review=True,
+    )
+
+
+def _check_is_requested(
+    requested_checks: dict[str, bool] | None,
+    check_name: str,
+) -> bool:
+    """Return whether a check should run.
+
+    None preserves the original behaviour by enabling the implemented
+    deterministic checks. An explicit mapping treats omitted keys as false.
+    """
+
+    if requested_checks is None:
+        return True
+
+    return requested_checks.get(check_name, False)
+
+
+def _disabled_check_outcome(
+    *,
+    category: FindingCategory,
+    check_name: str,
+) -> CheckOutcome:
+    """Describe a check intentionally excluded from this analysis request."""
+
+    return CheckOutcome(
+        category=category,
+        status=CheckOutcomeStatus.DISABLED,
+        message=(
+            f"The {check_name} check was not selected for this analysis. "
+            "It was intentionally not assessed."
+        ),
+        detection_method=None,
+        assessed_count=0,
+        scope="not_requested",
     )
 
 
@@ -297,13 +332,20 @@ def run_analysis(
     claims: Sequence[StructuredClaim] | None,
     approved_facts: Sequence[StructuredApprovedFact] = (),
     fact_lookup_completed: bool = False,
+    requested_checks: dict[str, bool] | None = None,
 ) -> AnalysisResponse:
     """
     Run the currently implemented terminology and structured-claim checks.
 
-    None means the corresponding input/check is unavailable.
-    An empty claims list means extraction ran but found no supported
-    structured claims. It does not mean the content has no factual claims.
+    None for requested_checks preserves the original default behaviour.
+
+    When requested_checks is explicitly provided, only checks set to true
+    are executed. Missing check names are treated as false.
+
+    None for terminology_rules or claims means the corresponding selected
+    input/check is unavailable. An empty claims list means extraction ran
+    but found no supported structured claims. It does not mean the content
+    has no factual claims.
 
     The caller must retrieve applicable approved records using the trusted
     organisation context and must not supply unapproved records.
@@ -313,7 +355,15 @@ def run_analysis(
     check_outcomes: list[CheckOutcome] = []
 
     # 1. Terminology check
-    if not terminology_rules:
+    if not _check_is_requested(requested_checks, "terminology"):
+        check_outcomes.append(
+            _disabled_check_outcome(
+                category=FindingCategory.TERMINOLOGY,
+                check_name="terminology",
+            )
+        )
+
+    elif not terminology_rules:
         finding = _unavailable_finding(
             category=FindingCategory.TERMINOLOGY,
             explanation=(
@@ -337,12 +387,14 @@ def run_analysis(
                 scope="supplied_approved_terminology_rules",
             )
         )
+
     else:
         terminology_findings = check_terminology(
             content_text,
             terminology_rules,
         )
         findings.extend(terminology_findings)
+
         check_outcomes.append(
             _terminology_outcome(
                 terminology_findings,
@@ -351,7 +403,15 @@ def run_analysis(
         )
 
     # 2. Claim extraction and approved-fact comparison
-    if claims is None:
+    if not _check_is_requested(requested_checks, "factual_claim"):
+        check_outcomes.append(
+            _disabled_check_outcome(
+                category=FindingCategory.FACTUAL_CLAIM,
+                check_name="factual_claim",
+            )
+        )
+
+    elif claims is None:
         findings.append(
             _unavailable_finding(
                 category=FindingCategory.FACTUAL_CLAIM,
@@ -438,14 +498,14 @@ def run_analysis(
             )
         )
 
-    # A partial result signals unavailable or limited check coverage.
-    # Conflicts and inconclusive findings can still be results of completed
-    # checks and do not alone make the overall run partial.
+    # A partial result signals unavailable or limited coverage in checks
+    # that were actually run. Intentionally disabled checks are not
+    # incomplete coverage and do not make an explicitly selected run partial.
     combined = aggregate_findings(findings)
+
     coverage_limited_statuses = {
         CheckOutcomeStatus.CHECK_UNAVAILABLE,
         CheckOutcomeStatus.COVERAGE_LIMITED,
-        CheckOutcomeStatus.DISABLED,
         CheckOutcomeStatus.NOT_ASSESSED,
     }
 

@@ -188,6 +188,14 @@ def test_worker_runs_real_analysis_and_hands_findings_to_persistence(
     findings = persisted["findings"]
     assert len(findings) == 1
 
+    check_outcomes = persisted["check_outcomes"]
+    assert isinstance(check_outcomes, list)
+    assert check_outcomes
+    assert all(
+        {"category", "status", "message"}.issubset(outcome)
+        for outcome in check_outcomes
+    )
+
     finding = findings[0]
     assert finding["category"] == "terminology"
     assert finding["severity"] == "medium"

@@ -43,6 +43,52 @@ from app.workers.analysis_tasks import CeleryAnalysisJobQueue
 
 router = APIRouter(tags=["submissions"])
 
+ANALYSIS_CHECK_NAMES = (
+    "tone",
+    "messaging",
+    "terminology",
+    "factual_claim",
+)
+
+
+def normalize_requested_checks(
+    requested_checks: dict[str, bool] | None,
+) -> dict[str, bool] | None:
+    """Return a complete, consistently ordered check-selection mapping."""
+
+    if requested_checks is None:
+        return None
+
+    return {
+        check_name: requested_checks.get(check_name, False)
+        for check_name in ANALYSIS_CHECK_NAMES
+    }
+
+
+def build_analysis_idempotency_key(
+    *,
+    submission_id: UUID,
+    version_number: int,
+    requested_checks: dict[str, bool] | None,
+) -> str:
+    """Build a stable key for a submission version and check selection."""
+
+    base_key = (
+        f"submission:{submission_id}:"
+        f"version:{version_number}:analysis:v1"
+    )
+
+    # Preserve the original key for requests that use default behaviour.
+    if requested_checks is None:
+        return base_key
+
+    checks_signature = ",".join(
+        f"{check_name}={str(requested_checks[check_name]).lower()}"
+        for check_name in ANALYSIS_CHECK_NAMES
+    )
+
+    return f"{base_key}:checks:{checks_signature}"
+
 
 def require_creator_or_admin(actor: AuthenticatedActor) -> None:
     if actor.role not in {"admin", "creator"}:
@@ -154,10 +200,16 @@ def queue_submission_analysis(
         else submission.current_version_number
     )
 
-    # Stable key for this submission/version. Repeating the same request
-    # will reuse the persisted job instead of creating another job.
-    idempotency_key = (
-        f"submission:{submission_id}:version:{version_number}:analysis:v1"
+    requested_checks = normalize_requested_checks(
+        request.requested_checks
+        if request is not None
+        else None
+    )
+
+    idempotency_key = build_analysis_idempotency_key(
+        submission_id=submission_id,
+        version_number=version_number,
+        requested_checks=requested_checks,
     )
 
     service = SubmissionAnalysisService(
@@ -171,6 +223,7 @@ def queue_submission_analysis(
             submission_id=submission_id,
             version_number=version_number,
             idempotency_key=idempotency_key,
+            requested_checks=requested_checks,
         )
     except LookupError as exc:
         raise HTTPException(
@@ -246,6 +299,7 @@ def get_analysis_job_status(
         completed_at=job.completed_at,
         error_code=job.error_code,
         error_message=job.error_message,
+        check_outcomes=job.check_outcomes or [],
     )
 
 

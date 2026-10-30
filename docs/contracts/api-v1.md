@@ -191,7 +191,11 @@ for the entire analysis to finish.
 
 ### GET /api/v1/analysis-jobs/{job_id}
 
-Return job status and any safe, user-readable failure details.
+Return job status, any safe, user-readable failure details, and a
+`check_outcomes` array describing the status and coverage of each
+analysis check. The array is empty while no outcomes have been persisted.
+Each outcome includes its category, status, user-readable message,
+detection method, assessed count, and optional scope.
 
 ### GET /api/v1/submissions/{submission_id}/findings?version=1
 

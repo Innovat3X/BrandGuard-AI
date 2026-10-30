@@ -173,6 +173,16 @@ A completed or partially completed job must be representable as:
   "submission_version_id": "submission-version-uuid",
   "status": "completed",
   "findings": [],
+  "check_outcomes": [
+    {
+      "category": "terminology",
+      "status": "supported",
+      "message": "Terminology checks completed.",
+      "detection_method": "deterministic",
+      "assessed_count": 1,
+      "scope": "submitted_text"
+    }
+  ],
   "summary": {
     "info": 0,
     "low": 0,
@@ -184,6 +194,25 @@ A completed or partially completed job must be representable as:
 
 The API may wrap findings in pagination metadata, but it must
 preserve the defined finding fields.
+
+The `check_outcomes` array records the status of each analysis check,
+including checks that completed successfully, found issues, were
+inconclusive, unavailable, intentionally disabled, not assessed, or
+limited in coverage. Each outcome contains:
+
+- `category`: the check category.
+- `status`: `supported`, `issues_found`, `inconclusive`,
+  `check_unavailable`, `disabled`, `not_assessed`, or
+  `coverage_limited`.
+- `message`: a user-readable description of the check result.
+- `detection_method`: the detection method, or null when not applicable.
+- `assessed_count`: a non-negative count of assessed items.
+- `scope`: optional description of the assessed scope.
+
+A disabled check is not a failed check and must not by itself make
+the analysis partial. These outcomes are persisted with the job and
+returned by the analysis-job status endpoint. Before any outcomes
+have been persisted, the endpoint returns an empty array.
 
 ## 12. Human oversight and retries
 

@@ -106,6 +106,26 @@ export type DetectionMethod =
   | "ocr"
   | "visual_check";
 
+// Status of an individual analysis check.
+export type CheckOutcomeStatus =
+  | "supported"
+  | "issues_found"
+  | "inconclusive"
+  | "check_unavailable"
+  | "disabled"
+  | "not_assessed"
+  | "coverage_limited";
+
+// Result describing what a check assessed.
+export interface CheckOutcome {
+  category: FindingCategory;
+  status: CheckOutcomeStatus;
+  message: string;
+  detection_method: DetectionMethod | null;
+  assessed_count: number;
+  scope: string | null;
+}
+
 // Evidence returned with a finding
 export interface FindingEvidence {
   submitted_text?: string | null;
@@ -168,6 +188,7 @@ export interface AnalysisResultResponse {
   submission_version_id: UUID;
   status: "completed" | "partial";
   findings: Finding[];
+  check_outcomes: CheckOutcome[];
   summary: AnalysisSummary;
 }
 
@@ -193,6 +214,7 @@ export interface AnalysisJobResponse {
   completed_at?: ISODateTime | null;
   error_code?: string | null;
   error_message?: string | null;
+  check_outcomes: CheckOutcome[];
 }
 
 // Submission creation response
